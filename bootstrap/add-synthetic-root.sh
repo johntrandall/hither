@@ -6,10 +6,13 @@
 # `apfs.util -t` to materialize the synthetic root dir at /Hither
 # without requiring a reboot.
 #
-# Per `man synthetic.conf`: single-column entries (no second field)
-# create empty directories at /. Tab-or-no-second-column required;
-# trailing whitespace after `Hither` would be interpreted as a symlink
-# target.
+# Per `man synthetic.conf`: a two-column `name<TAB>target` entry creates
+# a synthetic SYMLINK at /<name> pointing to <target>. We use this form
+# to point /Hither at /System/Volumes/Data/Hither so the synthetic root
+# lives on the writable Data volume (Sealed System Volume is read-only).
+# Single-column entries create empty stub directories at / which cannot
+# host autofs mounts on a sealed system volume — verified broken in
+# practice, hence the symlink form is the only one we ship.
 #
 # apfs.util -t is an Apple-private flag (not in `man apfs.util`),
 # discovered via the Nix installer pattern. Observed working on
@@ -26,7 +29,8 @@ fi
 SYNTHETIC=/etc/synthetic.conf
 APFS_UTIL=/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs.util
 TARGET_DIR=/Hither
-ENTRY="Hither"
+# Two-column symlink form: name<TAB>target. /Hither -> /System/Volumes/Data/Hither
+ENTRY=$'Hither\tSystem/Volumes/Data/Hither'
 
 # --- Pre-flight: /Hither must not already exist as a non-synthetic dir ---
 if [[ -e "${TARGET_DIR}" && ! -d "${TARGET_DIR}" ]]; then
@@ -41,14 +45,17 @@ if [[ -f "${SYNTHETIC}" ]] && ! ls "${SYNTHETIC}".pre-hither-* >/dev/null 2>&1; 
 fi
 
 # --- Append entry if not already present ---
-# Note: we match the entire line `^Hither$` (no second column, no whitespace)
-# to ensure idempotency. If somebody added `Hither\tsomething` (symlink form),
-# we leave it alone and warn.
+# Expected state: `Hither<TAB>System/Volumes/Data/Hither` (symlink form).
+# If we see ANY `Hither<...>` line (with or without target), treat as already
+# configured and skip. If a user has the legacy single-column directory form,
+# we leave it (don't auto-rewrite; operator can remove + reboot if needed).
 if [[ -f "${SYNTHETIC}" ]] && grep -qE "^Hither([[:space:]]|$)" "${SYNTHETIC}"; then
-  if grep -qE "^Hither[[:space:]]" "${SYNTHETIC}"; then
-    echo "[warn] ${SYNTHETIC} has 'Hither<TAB>...' (symlink form); leaving as-is"
+  if grep -qE $'^Hither\tSystem/Volumes/Data/Hither$' "${SYNTHETIC}"; then
+    echo "[skip] ${SYNTHETIC} already in symlink form (correct)"
+  elif grep -qE "^Hither[[:space:]]" "${SYNTHETIC}"; then
+    echo "[skip] ${SYNTHETIC} has 'Hither<TAB>...' (custom symlink target); leaving as-is"
   else
-    echo "[skip] ${SYNTHETIC} already contains 'Hither' entry"
+    echo "[warn] ${SYNTHETIC} has legacy 'Hither' directory form; leaving as-is (manual remove + reboot to upgrade)"
   fi
 else
   # Ensure file ends in newline before appending
@@ -56,7 +63,7 @@ else
     [[ "$(tail -c 1 "${SYNTHETIC}" | od -An -tx1 | tr -d ' ')" == "0a" ]] || printf '\n' >> "${SYNTHETIC}"
   fi
   printf '%s\n' "${ENTRY}" >> "${SYNTHETIC}"
-  echo "[ok] appended '${ENTRY}' to ${SYNTHETIC}"
+  echo "[ok] appended symlink-form entry to ${SYNTHETIC}"
 fi
 
 # --- Materialize via apfs.util -t (no reboot) ---
