@@ -1,0 +1,73 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# /usr/local/sbin/hither-write-map
+#
+# Root-owned wrapper for the single sudoers grant Hither needs on each Mac.
+# Replaces the path-traversable `infra-agent ALL=(root) NOPASSWD: /usr/bin/tee /etc/auto_smb_*`
+# pattern that the prior auto-smb-sync system used (sudoers wildcards in argument
+# position match `/`, allowing /etc/auto_smb_../sudoers.d/evil escape).
+#
+# Invoked by xysat (running as infra-agent) via:
+#   echo "<map body>" | sudo -n /usr/local/sbin/hither-write-map <host>
+#
+# Validates ${host} matches ^[a-z0-9-]+$ (whitelist; rejects traversal,
+# mixed case, spaces, special chars). Reads map body from stdin (capped
+# at 1 MiB to bound resource use). Atomically writes to /etc/hither_<host>
+# via tempfile + rename(2) — same-filesystem rename is atomic on APFS.
+# After successful write, runs `automount -cv` so the new map content is
+# immediately picked up by autofs.
+
+set -euo pipefail
+
+# --- Parse args ---
+if [[ $# -ne 1 ]]; then
+  echo "ERROR: usage: $(basename "$0") <host>" >&2
+  exit 2
+fi
+host="$1"
+
+# --- Validate ---
+if [[ ! "$host" =~ ^[a-z0-9-]+$ ]]; then
+  echo "ERROR: host must match ^[a-z0-9-]+$ (got: ${host})" >&2
+  exit 3
+fi
+
+# --- Establish target paths ---
+target="/etc/hither_${host}"
+tempfile="${target}.tmp.$$"
+
+# --- Read bounded stdin into the tempfile ---
+# 1 MiB cap is ~50x larger than the largest known map (~20 KiB)
+# Use mktemp-style + chmod-then-rename for atomicity
+umask 022
+if ! head -c 1048576 > "$tempfile"; then
+  rm -f "$tempfile"
+  echo "ERROR: failed to write tempfile ${tempfile}" >&2
+  exit 4
+fi
+
+# Refuse to write an empty file (would silently break mounts)
+if [[ ! -s "$tempfile" ]]; then
+  rm -f "$tempfile"
+  echo "ERROR: refusing to write empty map for ${host}" >&2
+  exit 5
+fi
+
+chmod 644 "$tempfile"
+chown root:wheel "$tempfile"
+
+# --- Atomic rename (POSIX rename(2) is atomic on same filesystem) ---
+if ! mv -f "$tempfile" "$target"; then
+  rm -f "$tempfile"
+  echo "ERROR: failed to rename ${tempfile} -> ${target}" >&2
+  exit 6
+fi
+
+# --- Reload autofs maps so new content is consumed immediately ---
+if ! /usr/sbin/automount -cv >/dev/null 2>&1; then
+  echo "ERROR: wrote ${target} but automount -cv failed" >&2
+  exit 7
+fi
+
+echo "OK: ${target} written, automount reloaded"
+exit 0

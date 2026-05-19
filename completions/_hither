@@ -1,0 +1,13 @@
+#compdef hither
+_hither() {
+  local -a subcommands
+  subcommands=(
+    'bootstrap:install or re-apply Hither system state'
+    'doctor:check mount health'
+    'verify-no-leaks:run pre-commit privacy gate'
+    'version:print version'
+    'help:show help'
+  )
+  _describe 'command' subcommands
+}
+_hither "$@"

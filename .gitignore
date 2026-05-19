@@ -1,0 +1,35 @@
+# Hither .gitignore
+
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local agent / project metadata
+.claude/
+.omnifocus.yml
+dev-docs/
+*.local
+*.private
+
+# Backups + transient
+*.bak
+*.tmp
+*.orig
+.*.lock
+
+# Logs / runtime artifacts
+*.log
+/var/log/
+
+# Privacy-pattern file MUST NEVER be committed — it lives in ~/.config/hither/
+leak-patterns.txt
+.privacy-patterns

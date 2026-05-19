@@ -1,0 +1,118 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# bin/hither — CLI entry point.
+#
+# Subcommands:
+#   bootstrap [--reapply-only]   Install/repair Hither on this Mac
+#   doctor                       Check mount health, Keychain, TM exclusion
+#   verify-no-leaks              Pre-commit privacy gate (scripts/verify-no-leaks.sh)
+#   version                      Print version
+#
+# Resolves its own location via readlink -f so the symlink at
+# ~/.local/bin/hither (created by lash install) still finds the
+# sibling scripts in the repo.
+
+set -euo pipefail
+
+# --- Locate the project root (symlink-safe) ---
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
+export HITHER_ROOT="${PROJECT_ROOT}"
+
+VERSION="0.1.0"
+
+usage() {
+  cat <<EOF
+hither ${VERSION} — lazy mounter for personal Mac fleets
+
+Usage:
+  hither bootstrap [--reapply-only]
+      Install (or re-apply) /etc/synthetic.conf, /etc/auto_master, the
+      hither-write-map wrapper, and the LaunchDaemon. Idempotent.
+      With --reapply-only, skips the wrapper-script install (used by
+      the boot-time LaunchDaemon, which only needs file re-application).
+      MUST be run via sudo with absolute path: sudo \$(which hither) bootstrap
+
+  hither doctor
+      Verify mounts are working: positive mount probe per share,
+      Keychain entry present, Time Machine exclusion applied.
+
+  hither verify-no-leaks [<path>]
+      Run the pre-commit privacy gate. Reads patterns from
+      ~/.config/hither/leak-patterns.txt. Defaults to scanning
+      \${HITHER_ROOT}.
+
+  hither version
+
+EOF
+}
+
+cmd_bootstrap() {
+  local reapply_only=0
+  for arg in "$@"; do
+    case "$arg" in
+      --reapply-only) reapply_only=1 ;;
+      *) echo "ERROR: unknown arg to bootstrap: $arg" >&2; exit 2 ;;
+    esac
+  done
+
+  if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: bootstrap requires root — run via: sudo \$(which hither) bootstrap" >&2
+    exit 1
+  fi
+
+  echo "=== Hither bootstrap (reapply_only=${reapply_only}) ==="
+
+  # 1. Install/re-apply synthetic.conf entry + materialize /Hither
+  bash "${HITHER_ROOT}/bootstrap/add-synthetic-root.sh"
+
+  # 2. Install/re-apply /etc/auto_master entry for each subscribed host
+  # For v1, the subscriber list is a single host: umbridge.
+  # v2: read from /etc/hither/hosts.conf or similar.
+  for host in umbridge; do
+    bash "${HITHER_ROOT}/bootstrap/apply-auto-master.sh" "${host}"
+  done
+
+  if [[ "$reapply_only" -eq 0 ]]; then
+    # 3. Install the wrapper script (sbin/hither-write-map)
+    install -m 0755 -o root -g wheel \
+      "${HITHER_ROOT}/sbin/hither-write-map" \
+      /usr/local/sbin/hither-write-map
+    echo "[ok] installed /usr/local/sbin/hither-write-map"
+
+    # 4. Install and load the LaunchDaemon
+    bash "${HITHER_ROOT}/bootstrap/install-launchdaemon.sh"
+  fi
+
+  echo "=== bootstrap complete ==="
+}
+
+cmd_doctor() {
+  bash "${HITHER_ROOT}/scripts/doctor.sh" "$@"
+}
+
+cmd_verify_no_leaks() {
+  bash "${HITHER_ROOT}/scripts/verify-no-leaks.sh" "$@"
+}
+
+cmd_version() {
+  echo "hither ${VERSION}"
+}
+
+# --- Dispatch ---
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+subcmd="$1"
+shift
+
+case "$subcmd" in
+  bootstrap)        cmd_bootstrap "$@" ;;
+  doctor)           cmd_doctor "$@" ;;
+  verify-no-leaks)  cmd_verify_no_leaks "$@" ;;
+  version|--version|-v) cmd_version ;;
+  help|--help|-h)   usage ;;
+  *)                echo "ERROR: unknown subcommand '${subcmd}'" >&2; usage; exit 2 ;;
+esac

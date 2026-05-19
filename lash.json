@@ -1,0 +1,22 @@
+{
+  "name": "hither",
+  "description": "Lazy mounter CLI for personal Mac fleets",
+  "operations": [
+    {
+      "type": "symlink",
+      "src": "./bin/hither",
+      "dest": "~/.local/bin/hither",
+      "chmod": "+x"
+    },
+    {
+      "type": "symlink",
+      "src": "./completions/hither.bash",
+      "dest": "~/.local/share/bash-completion/completions/hither"
+    },
+    {
+      "type": "symlink",
+      "src": "./completions/_hither",
+      "dest": "~/.local/share/zsh/site-functions/_hither"
+    }
+  ]
+}

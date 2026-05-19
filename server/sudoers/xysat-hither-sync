@@ -1,0 +1,13 @@
+# /etc/sudoers.d/xysat-hither-sync
+# Managed by Hither. Grants infra-agent (the xysat run-as user) the right
+# to invoke the root-owned map-writer wrapper. The wrapper validates its
+# {host} argument and atomically writes /etc/hither_{host} then runs
+# `automount -cv`. NO direct sudoers entry for `tee` or `automount` — the
+# wrapper is the single privileged surface, closing the path-traversal
+# vulnerability of the prior `tee /etc/auto_smb_*` wildcard grant.
+#
+# Deploy via: scp xysat-hither-sync infra-agent@<host>:/tmp/ && \
+#   sudo install -m 0440 -o root -g wheel /tmp/xysat-hither-sync /etc/sudoers.d/ && \
+#   sudo visudo -cf /etc/sudoers.d/xysat-hither-sync
+
+infra-agent ALL=(root) NOPASSWD: /usr/local/sbin/hither-write-map ^[a-z0-9-]+$
