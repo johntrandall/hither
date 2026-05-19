@@ -90,16 +90,16 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MANIFEST="${SCRIPT_DIR}/hither-sync.manifest.json"
-CANONICAL_SCRIPT_REL="setup/synology/xyops/jobs/hither-sync.sh"
+CANONICAL_SCRIPT_REL="server/hither-sync.sh"
 XYOPS_BASE="${XYOPS_BASE:-http://umbridge:5522}"
 FORGEJO_BASE="${FORGEJO_BASE:-http://umbridge:8914}"
 # Mac xysats reach Forgejo over Tailscale (they aren't sibling-Docker on
 # Umbridge). Use the FQDN; works on or off the home LAN.
 FORGEJO_BASE_MAC="${FORGEJO_BASE_MAC:-http://umbridge.tail486ac0.ts.net:8914}"
-REPO_OWNER="infra"
-REPO_NAME="admin-technical"
-SECRET_VAR_NAME="FORGEJO_RO_TOKEN_ADMIN_TECHNICAL"
-SECRET_TITLE="forgejo-ro-admin-technical"
+REPO_OWNER="dev"
+REPO_NAME="hither"
+SECRET_VAR_NAME="FORGEJO_RO_TOKEN_HITHER"
+SECRET_TITLE="forgejo-ro-hither"
 CATEGORY_TITLE="$(jq -r '.category_title' "$MANIFEST")"
 CATEGORY_DESCRIPTION="$(jq -r '.category_description // ""' "$MANIFEST")"
 CATEGORY_NOTES="$(jq -r '.category_notes // ""' "$MANIFEST")"
