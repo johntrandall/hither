@@ -20,9 +20,9 @@ References: github.com/johntrandall/hither, admin-technical ADR-NNN (Hither lazy
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/hither</string>
-        <string>bootstrap</string>
-        <string>--reapply-only</string>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>/bin/bash /Users/johnrandall/dev/hither/bootstrap/add-synthetic-root.sh &amp;&amp; /bin/bash /Users/johnrandall/dev/hither/bootstrap/apply-auto-master.sh umbridge</string>
     </array>
 
     <key>RunAtLoad</key>
