@@ -35,12 +35,24 @@ if [[ ! "$host" =~ ^[a-z0-9-]+$ ]]; then
 fi
 
 AUTO_MASTER=/etc/auto_master
-LOCK=/var/lock/hither.lock
+LOCK=/var/run/hither-bootstrap.lock
 
-# --- Hold lock for the duration of this run (race with LaunchDaemon or other invocations) ---
-mkdir -p "$(dirname "${LOCK}")"
-exec 9>"${LOCK}"
-flock -x 9
+# --- Hold lock for the duration of this run. macOS doesn't ship flock(1),
+# --- so use mkdir(1) as an atomic-create primitive: mkdir on an existing
+# --- dir returns non-zero, making it a portable mutex.
+LOCK_HELD=0
+for _ in 1 2 3 4 5; do
+  if mkdir "${LOCK}" 2>/dev/null; then
+    LOCK_HELD=1
+    trap 'rmdir "${LOCK}" 2>/dev/null || true' EXIT
+    break
+  fi
+  sleep 1
+done
+if [[ "$LOCK_HELD" -ne 1 ]]; then
+  echo "ERROR: failed to acquire ${LOCK} after 5s — another bootstrap in progress?" >&2
+  exit 5
+fi
 
 # --- Backup auto_master if not already backed up this run ---
 if ! ls "${AUTO_MASTER}".pre-hither-* >/dev/null 2>&1; then
