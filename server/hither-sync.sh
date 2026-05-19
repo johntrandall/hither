@@ -183,9 +183,11 @@ render_map() {
 
 apply_map_if_changed() {
   # Args: <nas-host>  (reads desired body on stdin)
-  # Diffs against /etc/hither_<nas>; if changed, sudo-writes + reloads.
+  # Diffs against /etc/hither_<nas>; if changed (or if a needs-reload marker
+  # is present from a prior failed automount), sudo-writes + reloads.
   local nas="$1"
   local map_path="/etc/hither_${nas}"
+  local marker_path="/etc/hither_${nas}.needs-reload"
   local desired_body
   desired_body=$(cat)
 
@@ -198,12 +200,19 @@ apply_map_if_changed() {
   d_normalized=$(printf '%s\n' "${desired_body}" | grep -v '^# Generated:')
   c_normalized=$(printf '%s\n' "${current_body}" | grep -v '^# Generated:')
 
-  if [[ "${d_normalized}" == "${c_normalized}" ]]; then
+  # If a marker is present, the prior wrapper wrote the map but the autofs
+  # reload failed — re-invoke unconditionally so the wrapper retries the
+  # `automount -cv`. The wrapper clears the marker on success.
+  if [[ ! -f "${marker_path}" && "${d_normalized}" == "${c_normalized}" ]]; then
     log "  no change for ${map_path} — skipping write"
     return 0
   fi
 
-  log "  diff detected for ${map_path} — applying via hither-write-map wrapper"
+  if [[ -f "${marker_path}" ]]; then
+    log "  ${marker_path} present (prior automount -cv failure) — forcing retry via wrapper"
+  else
+    log "  diff detected for ${map_path} — applying via hither-write-map wrapper"
+  fi
   printf '%s\n' "${desired_body}" \
     | sudo -n /usr/local/sbin/hither-write-map "${nas}" >/dev/null \
     || { log "  hither-write-map failed (wrapper handles both tee + automount -cv atomically)"; return 1; }

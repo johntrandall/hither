@@ -64,10 +64,22 @@ if ! mv -f "$tempfile" "$target"; then
 fi
 
 # --- Reload autofs maps so new content is consumed immediately ---
+# If the reload fails AFTER a successful map write, autofs has stale state
+# but the new map is on disk — so the next caller's diff comparison
+# (current_body == desired_body) would skip re-invoking us, leaving autofs
+# stale until reboot. Drop a marker file at /etc/hither_${host}.needs-reload
+# that hither-sync.sh checks BEFORE its diff to force a re-invocation.
+marker="/etc/hither_${host}.needs-reload"
 if ! /usr/sbin/automount -cv >/dev/null 2>&1; then
-  echo "ERROR: wrote ${target} but automount -cv failed" >&2
+  : > "${marker}" || true
+  chmod 644 "${marker}" 2>/dev/null || true
+  chown root:wheel "${marker}" 2>/dev/null || true
+  echo "ERROR: wrote ${target} but automount -cv failed; left marker ${marker} for next sync to retry" >&2
   exit 7
 fi
+
+# Successful reload — clear any stale marker from a prior failure.
+rm -f "${marker}" 2>/dev/null || true
 
 echo "OK: ${target} written, automount reloaded"
 exit 0

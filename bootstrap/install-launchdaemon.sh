@@ -29,13 +29,25 @@ mkdir -p "${LOG_DIR}"
 chown root:wheel "${LOG_DIR}"
 chmod 755 "${LOG_DIR}"
 
-# --- Install plist ---
-install -m 644 -o root -g wheel "${PLIST_SRC}" "${PLIST_DST}"
-echo "[ok] installed ${PLIST_DST}"
+# --- Install plist (detect changes; bootout+bootstrap to pick up new content) ---
+PLIST_CHANGED=0
+if [[ ! -f "${PLIST_DST}" ]] || ! cmp -s "${PLIST_SRC}" "${PLIST_DST}"; then
+  install -m 644 -o root -g wheel "${PLIST_SRC}" "${PLIST_DST}"
+  PLIST_CHANGED=1
+  echo "[ok] installed ${PLIST_DST}"
+else
+  echo "[skip] ${PLIST_DST} already up-to-date"
+fi
 
-# --- Load if not already loaded ---
+# --- Load (or reload if plist changed) ---
 if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-  echo "[skip] LaunchDaemon ${LABEL} already loaded"
+  if [[ "${PLIST_CHANGED}" -eq 1 ]]; then
+    launchctl bootout system "${PLIST_DST}" 2>/dev/null || true
+    launchctl bootstrap system "${PLIST_DST}"
+    echo "[ok] reloaded LaunchDaemon ${LABEL} (plist updated)"
+  else
+    echo "[skip] LaunchDaemon ${LABEL} already loaded"
+  fi
 else
   launchctl bootstrap system "${PLIST_DST}"
   echo "[ok] loaded LaunchDaemon ${LABEL}"

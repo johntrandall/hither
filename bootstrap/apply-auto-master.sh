@@ -40,6 +40,24 @@ LOCK=/var/run/hither-bootstrap.lock
 # --- Hold lock for the duration of this run. macOS doesn't ship flock(1),
 # --- so use mkdir(1) as an atomic-create primitive: mkdir on an existing
 # --- dir returns non-zero, making it a portable mutex.
+#
+# --- Stale-lock TTL: if the lock dir is older than LOCK_TTL_SEC (300s =
+#     5 min), assume the prior holder was SIGKILL'd (no EXIT-trap cleanup ran)
+#     and break the lock. Our work — text edits + automount -cv — completes in
+#     well under 5 seconds, so a 5-minute lock is unambiguously stale.
+LOCK_TTL_SEC=300
+if [[ -d "${LOCK}" ]]; then
+  # stat -f %m on macOS = mtime as epoch seconds; on Linux, use stat -c %Y.
+  # This script is macOS-only, but the form is documented for portability.
+  lock_mtime=$(stat -f %m "${LOCK}" 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+  age=$(( now_epoch - lock_mtime ))
+  if (( age > LOCK_TTL_SEC )); then
+    echo "[warn] stale lock ${LOCK} (${age}s old > ${LOCK_TTL_SEC}s TTL) — breaking"
+    rmdir "${LOCK}" 2>/dev/null || true
+  fi
+fi
+
 LOCK_HELD=0
 for _ in 1 2 3 4 5; do
   if mkdir "${LOCK}" 2>/dev/null; then

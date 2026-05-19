@@ -9,5 +9,23 @@
 # Deploy via: scp xysat-hither-sync infra-agent@<host>:/tmp/ && \
 #   sudo install -m 0440 -o root -g wheel /tmp/xysat-hither-sync /etc/sudoers.d/ && \
 #   sudo visudo -cf /etc/sudoers.d/xysat-hither-sync
+#
+# REGEX ARGUMENT CONSTRAINT — REQUIRES sudo >= 1.9.10
+# ===================================================
+# The `^[a-z0-9-]+$` form below is INTERPRETED AS A REGEX by sudo, not as
+# a fnmatch(3) glob. This is a feature introduced in sudo 1.9.10 (2022-04):
+#   https://www.sudo.ws/releases/stable/#1.9.10
+# Pre-1.9.10 sudo would treat the literal characters `^`, `$`, `[`, `]`,
+# `+` as fnmatch metacharacters or as ordinary literals — neither
+# interpretation matches actual hostnames, so the grant would never
+# activate. macOS Sequoia (15.x) ships sudo 1.9.13p2; Ventura+ also OK.
+#
+# DO NOT replace `^...$` with the visually-similar fnmatch glob `[a-z0-9-]+`
+# thinking it means the same thing — that form would silently fail to
+# match anything because `+` in fnmatch is a literal `+`. The anchors and
+# the `+` quantifier are load-bearing under regex interpretation.
+#
+# Verified working empirically via xyops-verify on susanbones (2026-05-19),
+# which exercises the full sudoers path through the wrapper.
 
 infra-agent ALL=(root) NOPASSWD: /usr/local/sbin/hither-write-map ^[a-z0-9-]+$

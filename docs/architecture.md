@@ -1,28 +1,31 @@
 # Architecture
 
-Hither is a two-sided system: a server-side job that enumerates available shares and pushes autofs maps, and a client-side configuration that makes those maps appear at stable paths on each Mac.
+Hither is a two-sided system: a scheduling layer that fires per-host events, and a client-side configuration that makes shares appear at stable paths on each Mac.
 
-## Server side (Umbridge — Synology NAS)
+## Server side — Conductor on Umbridge, workers on each Mac
 
-The server side runs as a single shell script (`server/hither-sync.sh`) scheduled by xyOps.
+Hither uses the xyOps "pull from Forgejo at pinned SHA" pattern. The Conductor on Umbridge schedules; the work executes on each subscriber Mac via its xysat worker. There is no SSH-out from Umbridge to the Macs.
 
 | Component | Detail |
 |---|---|
-| Scheduler | xyOps event `hither-sync-{host}`, daily at 04:00 |
-| Runner | `server/hither-sync.sh` |
-| Identity | Runs under the xysat satellite on Umbridge |
-| Source of truth | DSM API — enumerates SMB-accessible shares |
-| Delivery | SSH to each subscriber Mac, pipes map body to `sudo -n /usr/local/sbin/hither-write-map {host}` |
+| Scheduler | xyOps event `hither-sync-{host}`, daily at 04:{schedule_minute} ET |
+| Target | The Mac's xysat `server_id` (per-event, NOT category default) |
+| Runner | `server/hither-sync.sh` — fetched on each fire from Forgejo at the pinned SHA |
+| Run-as user | The xysat worker user on the Mac (`infra-agent`) |
+| Catch-up | `catch_up: true` — asleep at fire time runs on next reconnect, no missed runs |
+| Credential | Per-NAS DSM password injected via xyOps Secret (`{NAS_UPPER}_DSM_PASSWORD`) |
 
 The sync flow:
 
-1. The xyOps event fires at 04:00.
-2. `hither-sync.sh` calls the DSM Web API and gets the list of shares the executing user can see over SMB.
-3. The script formats that list as an autofs indirect-map body — one line per share, with the appropriate SMB URL and mount options.
-4. For each subscriber Mac in the manifest, the script SSHes in as `infra-agent` and pipes the map body into the wrapper: `cat map.body | ssh infra-agent@mac "sudo -n /usr/local/sbin/hither-write-map umbridge"`.
-5. The wrapper validates the hostname argument, writes `/etc/hither_umbridge` atomically, and runs `automount -cv` to pick up the change.
+1. The xyOps event fires at 04:{schedule_minute} ET (per-host minute, low-priority window).
+2. The Mac's xysat worker receives the fire and runs the **wrapper** stored in the event's `params.script`.
+3. The wrapper `curl`s `hither-sync.sh` from Forgejo at the pinned SHA (using a readonly Forgejo token injected as the xyOps secret `forgejo-ro-admin-technical`), saves it to a tempfile, `chmod +x`, and `exec`s it with `TARGET_USER`, `NAS_LIST`, `NAS_PROTO`, and `OP_VAULT` exported.
+4. `hither-sync.sh` calls the DSM Web API as the target user (`SYNO.FileStation.List/list_share`) — the server-side ACL filter returns exactly the shares that user can read.
+5. The script renders the share list as an autofs indirect-map body.
+6. It diffs against the on-disk `/etc/hither_{nas}`. If unchanged: no-op. If changed: pipes the body into `sudo -n /usr/local/sbin/hither-write-map {host}`.
+7. The wrapper validates the hostname argument against `^[a-z0-9-]+$`, atomically writes `/etc/hither_{host}`, and runs `automount -cv` to pick up the change.
 
-Subscribers are listed in `server/hither-sync.manifest.json` and the SSH grant is constrained by `server/sudoers/xysat-hither-sync` on the Synology side.
+The registration script (`server/register-events.sh`) creates and updates the per-host events from `hither-sync.manifest.json`. Subscribers are listed in the manifest's `hosts` array.
 
 ## Client side (each Mac)
 
@@ -30,11 +33,11 @@ Three pieces of system state on the Mac, each managed by a different bootstrap s
 
 | State | Path | Source | Frequency |
 |---|---|---|---|
-| Synthetic root | `/etc/synthetic.conf` line: `Hither` | `bootstrap/add-synthetic-root.sh` | One-shot; re-applied by daemon on revert |
+| Synthetic root | `/etc/synthetic.conf` line: `Hither\tSystem/Volumes/Data/Hither` (symlink form) | `bootstrap/add-synthetic-root.sh` | One-shot; re-applied by daemon on revert |
 | Autofs mountpoints | `/etc/auto_master` lines: `/Hither/{host}\thither_{host}\t-nosuid` | `bootstrap/apply-auto-master.sh` | One-shot per subscribed host; re-applied by daemon on revert |
-| Autofs maps | `/etc/hither_{host}` | Server (via wrapper) | Daily, regenerated on every sync |
+| Autofs maps | `/etc/hither_{host}` | xysat worker (via wrapper) | Daily, regenerated only when content changes |
 
-The first two pieces are structural — once set up, they only change when subscribing to a new host or recovering from a macOS update revert. The third piece is data — regenerated daily by the server.
+The first two pieces are structural — once set up, they only change when subscribing to a new host or recovering from a macOS update revert. The third piece is data — regenerated daily by the local xysat run.
 
 ## LaunchDaemon
 
@@ -62,22 +65,33 @@ The hostname whitelist is the security boundary. The original sudoers grant — 
 
 ```mermaid
 sequenceDiagram
-    participant XY as xyOps (Umbridge)
-    participant SH as hither-sync.sh
-    participant DSM as DSM API
-    participant SSH as ssh + sudo wrapper
+    participant XY as xyOps Conductor (Umbridge)
+    participant XS as xysat worker (Mac)
+    participant FJ as Forgejo (umbridge:8914)
+    participant SH as hither-sync.sh (local tmpfile)
+    participant DSM as DSM API (umbridge:5000)
+    participant W as hither-write-map (root)
     participant ETC as /etc/hither_umbridge
     participant AF as automountd
     participant USR as User shell
 
-    Note over XY: 04:00 daily
-    XY->>SH: fire hither-sync-susanbones
-    SH->>DSM: GET shares for executing user
-    DSM-->>SH: [Media, Home, Public, ...]
-    SH->>SH: format as autofs indirect map
-    SH->>SSH: ssh infra-agent@susanbones, pipe map
-    SSH->>ETC: validate host, atomic write
-    SSH->>AF: automount -cv
+    Note over XY: 04:{minute} daily
+    XY->>XS: fire hither-sync-{host} on target server_id
+    XS->>FJ: curl pinned-SHA script with token
+    FJ-->>XS: hither-sync.sh body
+    XS->>SH: chmod +x; exec with TARGET_USER, NAS_LIST
+    SH->>DSM: SYNO.API.Auth login as TARGET_USER
+    DSM-->>SH: SID
+    SH->>DSM: SYNO.FileStation.List/list_share
+    DSM-->>SH: shares visible to TARGET_USER
+    SH->>SH: render map; diff vs /etc/hither_umbridge
+    alt changed
+      SH->>W: sudo -n; pipe map body; arg=umbridge
+      W->>ETC: validate host; atomic mv
+      W->>AF: automount -cv
+    else unchanged
+      SH->>SH: no-op
+    end
     Note over USR: hours later
     USR->>AF: cd /Hither/umbridge/Media
     AF->>ETC: lookup "Media" in map

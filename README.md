@@ -10,27 +10,29 @@ Apple's autofs is great when it works and miserable when it doesn't. macOS syste
 
 Hither addresses all three problems. It mounts under `/Hither/` instead of `/Network/`, sidestepping the Finder naming clash and matching macOS's CamelCase root convention (`/Applications`, `/Library`, `/Volumes`). It uses a root-owned wrapper script with a strict `^[a-z0-9-]+$` host-name whitelist instead of a sudoers wildcard, closing the path-traversal hole. And it ships a LaunchDaemon that watches `/etc/auto_master` and `/etc/synthetic.conf`, re-applying Hither's lines whenever an OS update reverts them.
 
-On the server side, a daily xyOps job on the Synology NAS enumerates DSM's SMB-accessible shares and pushes a freshly generated autofs map to each subscriber Mac. On the client side, autofs handles everything else: shares mount on access, unmount on idle, and the user never sees the wiring.
+On the server side, a daily xyOps event fires per subscriber Mac. The Conductor (on Umbridge) schedules; the work executes on the Mac itself — its xysat worker pulls `hither-sync.sh` from Forgejo at a pinned SHA, enumerates DSM's SMB-accessible shares via the DSM Web API, and writes the regenerated autofs map locally. On the client side, autofs handles everything else: shares mount on access, unmount on idle, and the user never sees the wiring.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Server["Umbridge (Synology NAS)"]
-        XY[xyOps: daily 04:00]
-        SYNC[server/hither-sync.sh]
-        DSM[DSM API]
-        XY --> SYNC
-        SYNC --> DSM
+    subgraph Conductor["Umbridge (xyOps Conductor)"]
+        XY[xyOps event: daily 04:XX]
+        FJ[Forgejo: pinned-SHA script]
+        DSM[DSM Web API]
     end
 
     subgraph Client["Each subscriber Mac"]
+        XS[xysat worker as infra-agent]
+        SH[hither-sync.sh in /tmp]
         WRAP[/usr/local/sbin/hither-write-map]
         ETC[/etc/hither_umbridge]
         AM[/etc/auto_master]
         SC[/etc/synthetic.conf]
         AUTOFS[automountd]
         USER[User: cd /Hither/umbridge/share]
+        XS --> SH
+        SH --> WRAP
         WRAP --> ETC
         ETC --> AUTOFS
         AM --> AUTOFS
@@ -38,7 +40,9 @@ flowchart LR
         USER --> AUTOFS
     end
 
-    SYNC -- "ssh + sudo -n wrapper" --> WRAP
+    XY -- "fire event on target server_id" --> XS
+    XS -- "curl pinned-SHA script" --> FJ
+    SH -- "list_share as TARGET_USER" --> DSM
 ```
 
 ## Install
@@ -52,11 +56,14 @@ lash install
 sudo "$(which hither)" bootstrap
 ```
 
-`bootstrap` performs three steps:
+`bootstrap` performs four steps, in this order:
 
-1. Adds the `Hither` synthetic root to `/etc/synthetic.conf` and materializes it (via `apfs.util -t`).
-2. Installs the LaunchDaemon at `/Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist`.
-3. Applies the initial `/etc/auto_master` entries for each subscribed host.
+1. Adds the `Hither` synthetic-root symlink entry to `/etc/synthetic.conf` and materializes `/Hither` (via `apfs.util -t`).
+2. Applies the initial `/etc/auto_master` entries for each subscribed host (currently: `umbridge`).
+3. Installs the root-owned wrapper `sbin/hither-write-map` to `/usr/local/sbin/hither-write-map`.
+4. Installs and loads the LaunchDaemon at `/Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist`.
+
+`bootstrap --reapply-only` skips steps 3 and 4 (file install). It is what the LaunchDaemon itself runs at boot / on WatchPaths trigger.
 
 ## Verify
 
@@ -92,9 +99,9 @@ hither/
 ├── sbin/
 │   └── hither-write-map         # root-owned wrapper, installed at /usr/local/sbin/
 ├── bootstrap/
-│   ├── add-synthetic-root.sh    # /etc/synthetic.conf: append "Hither"
-│   ├── apply-auto-master.sh     # /etc/auto_master: append /Hither/{host} lines
-│   └── install-launchdaemon.sh  # /Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist
+│   ├── add-synthetic-root.sh    # installs to /usr/local/libexec/hither/; appends "Hither<TAB>System/Volumes/Data/Hither" to /etc/synthetic.conf
+│   ├── apply-auto-master.sh     # installs to /usr/local/libexec/hither/; appends /Hither/{host} lines to /etc/auto_master
+│   └── install-launchdaemon.sh  # installs the plist to /Library/LaunchDaemons/
 ├── launchd/
 │   └── com.johnrandall.hither.bootstrap.plist   # LaunchDaemon with ServiceDescription
 ├── server/

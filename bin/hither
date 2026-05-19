@@ -19,7 +19,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 usage() {
   cat <<EOF
@@ -80,7 +80,20 @@ cmd_bootstrap() {
       /usr/local/sbin/hither-write-map
     echo "[ok] installed /usr/local/sbin/hither-write-map"
 
-    # 4. Install and load the LaunchDaemon
+    # 4. Install the bootstrap scripts to a system path so the LaunchDaemon
+    #    doesn't have to reach into a user-home repo (mode-700 by default
+    #    on Sequoia; daemon executes as root but should not depend on a
+    #    user-home path that may be unreadable, missing, or relocated).
+    install -d -m 0755 -o root -g wheel /usr/local/libexec/hither
+    install -m 0755 -o root -g wheel \
+      "${HITHER_ROOT}/bootstrap/add-synthetic-root.sh" \
+      /usr/local/libexec/hither/add-synthetic-root.sh
+    install -m 0755 -o root -g wheel \
+      "${HITHER_ROOT}/bootstrap/apply-auto-master.sh" \
+      /usr/local/libexec/hither/apply-auto-master.sh
+    echo "[ok] installed /usr/local/libexec/hither/{add-synthetic-root,apply-auto-master}.sh"
+
+    # 5. Install and load the LaunchDaemon (depends on step 4 paths)
     bash "${HITHER_ROOT}/bootstrap/install-launchdaemon.sh"
   fi
 
