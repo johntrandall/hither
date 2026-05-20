@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.johnrandall.hither.sync</string>
+
+    <key>ServiceDescription</key>
+    <string>Hither sync — daily DSM share enumeration + autofs map regeneration in user GUI context.
+
+Purpose: Fires once daily at 04:23 local time. Calls the DSM Web API as TARGET_USER, enumerates the SMB-readable shares for that user, renders an /etc/hither_{nas} indirect map body, diffs it against the on-disk file, and (when changed) pipes it through `sudo -n /usr/local/sbin/hither-write-map {nas}` which atomically writes the map and runs `automount -cv`. Idempotent — re-runs are no-ops when the share list and on-disk map agree.
+
+Context: Runs as a LaunchAgent under the user's GUI session — NOT a LaunchDaemon. The user-context requirement is load-bearing: DSM password lookup via `security find-internet-password` requires Keychain access, which is only available in a GUI-session security context. The same Keychain entry that Finder Cmd-K uses for SMB mounts is the one this agent reads. Running this work as root via LaunchDaemon was tried and rejected (Keychain access fails under launchd-root with errSecAuthFailed -25293).
+
+Dependencies: requires /usr/local/libexec/hither/hither-sync.sh (root-owned, mode 0755 — installed by `hither bootstrap`); /usr/local/sbin/hither-write-map (root-owned, mode 0755); /etc/sudoers.d/hither-write-map granting this user NOPASSWD on the wrapper for the configured NAS hostnames; a Keychain entry for each NAS in NAS_LIST keyed (server=$NAS, account=$TARGET_USER). Network reachability to the NAS (LAN or Tailscale) at fire time.
+
+Operation: stdout → ~/Library/Logs/hither/sync.log; stderr → ~/Library/Logs/hither/sync.stderr.log. Use `launchctl print gui/$(id -u)/com.johnrandall.hither.sync` to inspect state. Use `launchctl kickstart gui/$(id -u)/com.johnrandall.hither.sync` to fire manually (or `hither sync` for the same effect from a user shell). Use `launchctl bootout gui/$(id -u)/com.johnrandall.hither.sync` to disable.
+
+Sibling: com.johnrandall.hither.bootstrap (LaunchDaemon, root context, defends /etc/synthetic.conf + /etc/auto_master against macOS update reverts). The two daemons have non-overlapping roles — defender does local file repair only (no network), sync does the network/API/credential work (no file repair). Splitting them by privilege/context is what makes Hither self-contained on a single Mac.
+
+References: github.com/johntrandall/hither; admin-technical ADR-NNN (Hither lazy-mounter); design-decisions.md "Why a LaunchAgent for sync, not a LaunchDaemon".</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/hither/hither-sync.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>23</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/sbin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/sbin:/usr/bin:/sbin:/bin</string>
+        <key>TARGET_USER</key>
+        <string>johntrandall</string>
+        <key>NAS_LIST</key>
+        <string>umbridge</string>
+        <key>NAS_PROTO</key>
+        <string>http</string>
+    </dict>
+
+    <!--
+        StandardOutPath / StandardErrorPath are TEMPLATED at install time by
+        `hither bootstrap`. The plist on disk (template form) contains the
+        literal token __HOME__; the installer substitutes the calling user's
+        $HOME before writing to ~/Library/LaunchAgents/. launchd does NOT
+        expand environment variables in plist paths — the substitution has
+        to happen at install time, not at fire time.
+    -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/hither/sync.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/hither/sync.stderr.log</string>
+</dict>
+</plist>

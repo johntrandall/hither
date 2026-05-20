@@ -102,6 +102,30 @@ The v0.1.1 layout copies the bootstrap scripts into `/usr/local/libexec/hither/`
 
 `/usr/local/libexec/` is the FHS-aligned location for "binaries executed by other programs, not directly by users." It is the right home for daemon-invoked scripts.
 
+## Why a LaunchAgent for sync, not a LaunchDaemon (v0.2.0)
+
+v0.1.x ran the daily share-enumeration via xyOps — the Conductor on Umbridge fired a per-Mac event daily, the Mac's xysat worker pulled the script from Forgejo at a pinned SHA, and ran it as the `infra-agent` service account. The credential model layered xyOps Secret injection (`${NAS_UPPER}_DSM_PASSWORD`) on top of a 1Password fallback (`op item get`).
+
+That worked, but it was wrong for a distributable tool. Per the v0.2 → v1.0 roadmap's design north star: **Hither must be a self-contained per-Mac tool.** A stranger should be able to `brew install johntrandall/hither/hither` and have working lazy-mounted SMB shares — without setting up xyOps, without a Synology Conductor, without a 1Password vault. Anything that requires an external orchestrator is wrong for the packaged tool.
+
+v0.2.0 drops the external orchestration and replaces it with a per-Mac LaunchAgent. Three reasons it has to be a LaunchAgent and not a LaunchDaemon:
+
+1. **Keychain access.** The DSM password lives in macOS Keychain — the same entry Finder's Cmd-K populates for SMB mounts. `security find-internet-password -s <nas> -a <user> -w` reads it. That call requires a GUI security session (`gui/<uid>` launchd domain). Running the sync as a LaunchDaemon was tried and rejected — Keychain calls fail with `errSecAuthFailed (-25293)` under launchd-root, even with the keychain unlocked at the user level. (See `feedback-keychain-fails-under-launchd.md` in the operator's memory.)
+2. **No external secret store.** Reading from Keychain means no 1Password, no xyOps Secret, no Vault-style server. The user already manages this credential via Finder. We piggyback on it.
+3. **No external orchestrator.** A LaunchAgent's `StartCalendarInterval` is per-Mac. It needs nothing outside the Mac to fire on schedule. Catch-up on resume is handled by launchd's normal behavior.
+
+The trade-off: the user must be logged in for the sync to fire. For a personal Mac, that's nearly always true. For a server Mac that's intentionally headless, the sync wouldn't fire — but a server Mac doesn't need lazy autofs either; static mounts are fine. The deferred case is small enough to ignore.
+
+Counterpart split: the **defender** stays a LaunchDaemon. It must run at boot before login, must write `/etc/synthetic.conf` and `/etc/auto_master` (which a LaunchAgent cannot), and must not depend on network or Keychain. Two daemons, two contexts, two non-overlapping responsibilities.
+
+## Why drop the 1Password fallback (v0.2.0)
+
+v0.1.x's `dsm_login` resolved credentials in this order: env-var → `$DSM_PASSWORD` → `op item get`. The `op` fallback was useful when manual-fired from John's shell (his 1P session was active), but irrelevant on the production sync path (the xysat worker ran as `infra-agent` with no 1P session).
+
+v0.2.0 drops the `op` fallback entirely. The env-var override is preserved (it lets the operator do `UMBRIDGE_DSM_PASSWORD=$(op read ...) hither sync` for manual fires). Routine sync goes Keychain-only.
+
+The architectural argument: Hither shipping to strangers must not require 1Password. Keeping the `op` code path branched — with comments explaining when it does and doesn't apply — adds maintenance surface and confuses readers. Strip it. Operators who want 1P can inject via env-var, which is the universal-interface escape hatch.
+
 ## Why a `.needs-reload` marker file on automount failure
 
 The v0.1.0 wrapper had a subtle stuck-state bug. The sync script's diff comparison (`current_body == desired_body`) is between the on-disk map and the desired map. If `mv -f tmp target` succeeded but `automount -cv` failed afterward, the on-disk file matched the desired content — so the *next* sync run saw `current == desired` and skipped re-invocation entirely. The autofs cache stayed stale until the Mac rebooted.

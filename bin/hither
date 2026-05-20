@@ -4,6 +4,7 @@
 #
 # Subcommands:
 #   bootstrap [--reapply-only]   Install/repair Hither on this Mac
+#   sync                         Manual fire of the daily sync (uses LaunchAgent's logic)
 #   doctor                       Check mount health, Keychain, TM exclusion
 #   verify-no-leaks              Pre-commit privacy gate (scripts/verify-no-leaks.sh)
 #   version                      Print version
@@ -19,7 +20,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 
 usage() {
   cat <<EOF
@@ -28,14 +29,33 @@ hither ${VERSION} — lazy mounter for personal Mac fleets
 Usage:
   hither bootstrap [--reapply-only]
       Install (or re-apply) /etc/synthetic.conf, /etc/auto_master, the
-      hither-write-map wrapper, and the LaunchDaemon. Idempotent.
-      With --reapply-only, skips the wrapper-script install (used by
+      hither-write-map wrapper, the LaunchDaemon (revert defender), and
+      the LaunchAgent (daily sync). Idempotent.
+
+      Bootstrap has two phases:
+        - Root phase: file installs to /etc/, /usr/local/sbin, /usr/local/libexec,
+          and /Library/LaunchDaemons. MUST be run via sudo with absolute path.
+        - User phase: LaunchAgent install to ~/Library/LaunchAgents and
+          launchctl bootstrap into the user's GUI session. MUST be run as
+          the consuming user (NOT sudo) — LaunchAgents live in user home.
+
+      Recommended invocation:
+        sudo \$(which hither) bootstrap        # root phase
+        hither bootstrap --user-only           # user phase (different shell)
+
+      With --reapply-only, skips wrapper/libexec/LaunchAgent install (used by
       the boot-time LaunchDaemon, which only needs file re-application).
-      MUST be run via sudo with absolute path: sudo \$(which hither) bootstrap
+
+  hither sync
+      Manually fire the daily sync — runs /usr/local/libexec/hither/hither-sync.sh
+      in the current user shell. Uses Keychain for DSM password unless
+      \${NAS_UPPER}_DSM_PASSWORD is set. Equivalent to
+      \`launchctl kickstart gui/\$(id -u)/com.johnrandall.hither.sync\`.
 
   hither doctor
       Verify mounts are working: positive mount probe per share,
-      Keychain entry present, Time Machine exclusion applied.
+      Keychain entry present, Time Machine exclusion applied, both
+      LaunchDaemon and LaunchAgent loaded.
 
   hither verify-no-leaks [<path>]
       Run the pre-commit privacy gate. Reads patterns from
@@ -47,57 +67,158 @@ Usage:
 EOF
 }
 
-cmd_bootstrap() {
-  local reapply_only=0
-  for arg in "$@"; do
-    case "$arg" in
-      --reapply-only) reapply_only=1 ;;
-      *) echo "ERROR: unknown arg to bootstrap: $arg" >&2; exit 2 ;;
-    esac
-  done
+# --- bootstrap: root phase (file installs into /etc, /usr/local, /Library) ---
+bootstrap_root_phase() {
+  local reapply_only="$1"
 
-  if [[ $EUID -ne 0 ]]; then
-    echo "ERROR: bootstrap requires root — run via: sudo \$(which hither) bootstrap" >&2
-    exit 1
-  fi
-
-  echo "=== Hither bootstrap (reapply_only=${reapply_only}) ==="
+  echo "=== Hither bootstrap — root phase (reapply_only=${reapply_only}) ==="
 
   # 1. Install/re-apply synthetic.conf entry + materialize /Hither
   bash "${HITHER_ROOT}/bootstrap/add-synthetic-root.sh"
 
   # 2. Install/re-apply /etc/auto_master entry for each subscribed host
-  # For v1, the subscriber list is a single host: umbridge.
-  # v2: read from /etc/hither/hosts.conf or similar.
+  # For v0.2, the subscriber list is a single host: umbridge.
+  # v0.3 reads from ~/.config/hither/subscriptions/<nas>.toml.
   for host in umbridge; do
     bash "${HITHER_ROOT}/bootstrap/apply-auto-master.sh" "${host}"
   done
 
-  if [[ "$reapply_only" -eq 0 ]]; then
-    # 3. Install the wrapper script (sbin/hither-write-map)
-    install -m 0755 -o root -g wheel \
-      "${HITHER_ROOT}/sbin/hither-write-map" \
-      /usr/local/sbin/hither-write-map
-    echo "[ok] installed /usr/local/sbin/hither-write-map"
-
-    # 4. Install the bootstrap scripts to a system path so the LaunchDaemon
-    #    doesn't have to reach into a user-home repo (mode-700 by default
-    #    on Sequoia; daemon executes as root but should not depend on a
-    #    user-home path that may be unreadable, missing, or relocated).
-    install -d -m 0755 -o root -g wheel /usr/local/libexec/hither
-    install -m 0755 -o root -g wheel \
-      "${HITHER_ROOT}/bootstrap/add-synthetic-root.sh" \
-      /usr/local/libexec/hither/add-synthetic-root.sh
-    install -m 0755 -o root -g wheel \
-      "${HITHER_ROOT}/bootstrap/apply-auto-master.sh" \
-      /usr/local/libexec/hither/apply-auto-master.sh
-    echo "[ok] installed /usr/local/libexec/hither/{add-synthetic-root,apply-auto-master}.sh"
-
-    # 5. Install and load the LaunchDaemon (depends on step 4 paths)
-    bash "${HITHER_ROOT}/bootstrap/install-launchdaemon.sh"
+  if [[ "$reapply_only" -eq 1 ]]; then
+    echo "=== bootstrap root phase complete (reapply-only) ==="
+    return 0
   fi
 
-  echo "=== bootstrap complete ==="
+  # 3. Install the wrapper script (sbin/hither-write-map)
+  install -m 0755 -o root -g wheel \
+    "${HITHER_ROOT}/sbin/hither-write-map" \
+    /usr/local/sbin/hither-write-map
+  echo "[ok] installed /usr/local/sbin/hither-write-map"
+
+  # 4. Install the bootstrap scripts + the sync script to /usr/local/libexec/hither.
+  #    LaunchDaemon (boot-time, root) needs the bootstrap scripts there because
+  #    user-home repos may be mode-700 / unreadable / relocated. LaunchAgent
+  #    (daily, user) needs hither-sync.sh there for the same reason — the
+  #    plist's ProgramArguments points at this system path, not a user-home
+  #    repo clone.
+  install -d -m 0755 -o root -g wheel /usr/local/libexec/hither
+  install -m 0755 -o root -g wheel \
+    "${HITHER_ROOT}/bootstrap/add-synthetic-root.sh" \
+    /usr/local/libexec/hither/add-synthetic-root.sh
+  install -m 0755 -o root -g wheel \
+    "${HITHER_ROOT}/bootstrap/apply-auto-master.sh" \
+    /usr/local/libexec/hither/apply-auto-master.sh
+  install -m 0755 -o root -g wheel \
+    "${HITHER_ROOT}/libexec/hither-sync.sh" \
+    /usr/local/libexec/hither/hither-sync.sh
+  echo "[ok] installed /usr/local/libexec/hither/{add-synthetic-root,apply-auto-master,hither-sync}.sh"
+
+  # 5. Install and load the LaunchDaemon (depends on step 4 paths)
+  bash "${HITHER_ROOT}/bootstrap/install-launchdaemon.sh"
+
+  echo "=== bootstrap root phase complete ==="
+  echo
+  echo "Next: run the user phase (without sudo) to install the LaunchAgent:"
+  echo "      hither bootstrap --user-only"
+}
+
+# --- bootstrap: user phase (LaunchAgent install into ~/Library/LaunchAgents) ---
+bootstrap_user_phase() {
+  if [[ $EUID -eq 0 ]]; then
+    echo "ERROR: bootstrap --user-only must NOT be run as root — LaunchAgents live in user home" >&2
+    exit 1
+  fi
+
+  echo "=== Hither bootstrap — user phase (uid=$(id -u)) ==="
+
+  # Source plist must exist at the install-time-templated path. The bootstrap
+  # root phase puts hither-sync.sh at /usr/local/libexec/hither/. The plist
+  # template references it directly there; we just need to substitute __HOME__.
+  local agent_dir="${HOME}/Library/LaunchAgents"
+  local agent_dst="${agent_dir}/com.johnrandall.hither.sync.plist"
+  local agent_src="${HITHER_ROOT}/launchd/com.johnrandall.hither.sync.plist"
+
+  if [[ ! -f "${agent_src}" ]]; then
+    echo "ERROR: LaunchAgent template not found at ${agent_src}" >&2
+    exit 1
+  fi
+
+  mkdir -p "${agent_dir}"
+  mkdir -p "${HOME}/Library/Logs/hither"
+
+  # Substitute __HOME__ → $HOME at install time. launchd does NOT expand env
+  # vars in plist paths; the substitution has to happen here.
+  sed "s|__HOME__|${HOME}|g" "${agent_src}" > "${agent_dst}.tmp"
+  chmod 0644 "${agent_dst}.tmp"
+  mv "${agent_dst}.tmp" "${agent_dst}"
+  echo "[ok] installed ${agent_dst}"
+
+  # Validate before loading — a malformed plist would otherwise fail at
+  # `launchctl bootstrap` with a less-actionable error.
+  if ! plutil -lint "${agent_dst}" >/dev/null; then
+    echo "ERROR: ${agent_dst} failed plutil -lint after install" >&2
+    exit 1
+  fi
+
+  # Reload: bootout (ignore error if not loaded), then bootstrap. Bootstrap
+  # without prior bootout is a no-op if the daemon is already loaded with a
+  # different content — same gotcha that bit the LaunchDaemon in v0.1.1.
+  local domain="gui/$(id -u)"
+  launchctl bootout "${domain}/com.johnrandall.hither.sync" 2>/dev/null || true
+  if launchctl bootstrap "${domain}" "${agent_dst}"; then
+    echo "[ok] LaunchAgent loaded into ${domain}"
+  else
+    echo "ERROR: launchctl bootstrap ${domain} failed" >&2
+    exit 1
+  fi
+
+  echo "=== bootstrap user phase complete ==="
+}
+
+cmd_bootstrap() {
+  local reapply_only=0
+  local user_only=0
+  local root_only=0
+  for arg in "$@"; do
+    case "$arg" in
+      --reapply-only) reapply_only=1 ;;
+      --user-only)    user_only=1 ;;
+      --root-only)    root_only=1 ;;
+      *) echo "ERROR: unknown arg to bootstrap: $arg" >&2; exit 2 ;;
+    esac
+  done
+
+  if [[ $user_only -eq 1 ]]; then
+    bootstrap_user_phase
+    return
+  fi
+
+  # Default: root phase. EUID check.
+  if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: bootstrap requires root — run via: sudo \$(which hither) bootstrap" >&2
+    echo "       Or run just the user phase (no sudo): hither bootstrap --user-only" >&2
+    exit 1
+  fi
+
+  bootstrap_root_phase "$reapply_only"
+
+  if [[ $root_only -eq 1 ]]; then
+    return
+  fi
+  # Don't auto-run user phase from the root phase — sudo's EUID is 0 and the
+  # LaunchAgent would land in root's home. Operator runs --user-only separately.
+}
+
+cmd_sync() {
+  if [[ $EUID -eq 0 ]]; then
+    echo "ERROR: 'hither sync' must NOT be run as root — Keychain access requires user GUI session" >&2
+    exit 1
+  fi
+  if [[ ! -x /usr/local/libexec/hither/hither-sync.sh ]]; then
+    echo "ERROR: /usr/local/libexec/hither/hither-sync.sh not installed — run: sudo \$(which hither) bootstrap" >&2
+    exit 1
+  fi
+  # Pass through env (TARGET_USER, NAS_LIST, etc.) — script has sensible defaults.
+  exec /usr/local/libexec/hither/hither-sync.sh "$@"
 }
 
 cmd_doctor() {
@@ -123,6 +244,7 @@ shift
 
 case "$subcmd" in
   bootstrap)        cmd_bootstrap "$@" ;;
+  sync)             cmd_sync "$@" ;;
   doctor)           cmd_doctor "$@" ;;
   verify-no-leaks)  cmd_verify_no_leaks "$@" ;;
   version|--version|-v) cmd_version ;;

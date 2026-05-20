@@ -28,13 +28,28 @@ else
   fail "/etc/auto_master missing /Hither entries"
 fi
 
-# --- 3. LaunchDaemon loaded ---
+# --- 3. LaunchDaemon (revert defender) loaded ---
 if sudo -n launchctl print system/com.johnrandall.hither.bootstrap >/dev/null 2>&1; then
   ok "LaunchDaemon com.johnrandall.hither.bootstrap loaded"
 elif launchctl print system/com.johnrandall.hither.bootstrap >/dev/null 2>&1; then
   ok "LaunchDaemon com.johnrandall.hither.bootstrap loaded"
 else
   warn "Cannot confirm LaunchDaemon state (may need sudo)"
+fi
+
+# --- 3b. LaunchAgent (daily sync) loaded ---
+# Runs in user GUI context — no sudo needed to query.
+if launchctl print "gui/$(id -u)/com.johnrandall.hither.sync" >/dev/null 2>&1; then
+  ok "LaunchAgent com.johnrandall.hither.sync loaded"
+else
+  warn "LaunchAgent com.johnrandall.hither.sync not loaded — run: hither bootstrap --user-only"
+fi
+
+# --- 3c. Installed sync script present + executable ---
+if [[ -x /usr/local/libexec/hither/hither-sync.sh ]]; then
+  ok "/usr/local/libexec/hither/hither-sync.sh present"
+else
+  fail "/usr/local/libexec/hither/hither-sync.sh missing — run: sudo \$(which hither) bootstrap"
 fi
 
 # --- 4. Wrapper script present + executable ---

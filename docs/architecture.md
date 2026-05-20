@@ -1,56 +1,49 @@
 # Architecture
 
-Hither is a two-sided system: a scheduling layer that fires per-host events, and a client-side configuration that makes shares appear at stable paths on each Mac.
+Hither is a self-contained per-Mac tool. There is no Hither server. Two daemons on each Mac, with non-overlapping responsibilities split by privilege/context, handle everything.
 
-## Server side — Conductor on Umbridge, workers on each Mac
+## Two daemons
 
-Hither uses the xyOps "pull from Forgejo at pinned SHA" pattern. The Conductor on Umbridge schedules; the work executes on each subscriber Mac via its xysat worker. There is no SSH-out from Umbridge to the Macs.
+| Daemon | Type | Context | Role | Network? |
+|---|---|---|---|---|
+| `com.johnrandall.hither.bootstrap` | LaunchDaemon | root | Re-apply `/etc/synthetic.conf` + `/etc/auto_master` on revert; RunAtLoad + WatchPaths | never — runs before Tailscale/Wi-Fi |
+| `com.johnrandall.hither.sync` | LaunchAgent | user GUI | Daily DSM API call → render map → write via `hither-write-map`; on-demand via `hither sync` | yes |
 
-| Component | Detail |
-|---|---|
-| Scheduler | xyOps event `hither-sync-{host}`, daily at 04:{schedule_minute} ET |
-| Target | The Mac's xysat `server_id` (per-event, NOT category default) |
-| Runner | `server/hither-sync.sh` — fetched on each fire from Forgejo at the pinned SHA |
-| Run-as user | The xysat worker user on the Mac (`infra-agent`) |
-| Catch-up | `catch_up: true` — asleep at fire time runs on next reconnect, no missed runs |
-| Credential | Per-NAS DSM password injected via xyOps Secret (`{NAS_UPPER}_DSM_PASSWORD`) |
+The privilege/context split is load-bearing:
 
-The sync flow:
+- **The defender must run as root.** It writes to `/etc/synthetic.conf` and `/etc/auto_master`. It cannot run as a LaunchAgent because LaunchAgents have no write access to `/etc/`.
+- **The sync must run in user GUI context.** It calls `security find-internet-password` to read the DSM password from Keychain. Keychain access requires a GUI security session (`gui/<uid>` launchd domain). Running this work as a LaunchDaemon was tried and rejected — Keychain calls fail with `errSecAuthFailed (-25293)` under launchd-root.
+- **The defender must do no network calls.** It runs at boot, before Tailscale is up. A network call would hang or fail.
+- **The sync may rely on network.** It runs at 04:23 local time, after Tailscale/Wi-Fi is fully up. Catch-up on resume is handled by launchd's normal StartCalendarInterval semantics (missed runs fire on next wake).
 
-1. The xyOps event fires at 04:{schedule_minute} ET (per-host minute, low-priority window).
-2. The Mac's xysat worker receives the fire and runs the **wrapper** stored in the event's `params.script`.
-3. The wrapper `curl`s `hither-sync.sh` from Forgejo at the pinned SHA (using a readonly Forgejo token injected as the xyOps secret `forgejo-ro-admin-technical`), saves it to a tempfile, `chmod +x`, and `exec`s it with `TARGET_USER` and `NAS_LIST` exported. `NAS_PROTO` (default `http`) and `OP_VAULT` (default `JRVIS Infra`) are not exported by the wrapper; they fall back to the defaults in `hither-sync.sh`.
-4. `hither-sync.sh` calls the DSM Web API as the target user (`SYNO.FileStation.List/list_share`) — the server-side ACL filter returns exactly the shares that user can read.
-5. The script renders the share list as an autofs indirect-map body.
-6. It diffs against the on-disk `/etc/hither_{nas}`. If unchanged: no-op. If changed: pipes the body into `sudo -n /usr/local/sbin/hither-write-map {host}`.
-7. The wrapper validates the hostname argument against `^[a-z0-9-]+$`, atomically writes `/etc/hither_{host}`, and runs `automount -cv` to pick up the change.
-
-The registration script (`server/register-events.sh`) creates and updates the per-host events from `hither-sync.manifest.json`. Subscribers are listed in the manifest's `hosts` array.
-
-## Client side (each Mac)
+## Client-side state
 
 Three pieces of system state on the Mac, each managed by a different bootstrap step:
 
 | State | Path | Source | Frequency |
 |---|---|---|---|
-| Synthetic root | `/etc/synthetic.conf` line: `Hither\tSystem/Volumes/Data/Hither` (symlink form) | `bootstrap/add-synthetic-root.sh` | One-shot; re-applied by daemon on revert |
-| Autofs mountpoints | `/etc/auto_master` lines: `/Hither/{host}\thither_{host}\t-nosuid` | `bootstrap/apply-auto-master.sh` | One-shot per subscribed host; re-applied by daemon on revert |
-| Autofs maps | `/etc/hither_{host}` | xysat worker (via wrapper) | Daily, regenerated only when content changes |
+| Synthetic root | `/etc/synthetic.conf` line: `Hither\tSystem/Volumes/Data/Hither` (symlink form) | `bootstrap/add-synthetic-root.sh` | One-shot; re-applied by defender on revert |
+| Autofs mountpoints | `/etc/auto_master` lines: `/Hither/{host}\thither_{host}\t-nosuid` | `bootstrap/apply-auto-master.sh` | One-shot per subscribed host; re-applied by defender on revert |
+| Autofs maps | `/etc/hither_{host}` | LaunchAgent → `hither-sync.sh` → `hither-write-map` | Daily, regenerated only when content changes |
 
-The first two pieces are structural — once set up, they only change when subscribing to a new host or recovering from a macOS update revert. The third piece is data — regenerated daily by the local xysat run.
+The first two are structural. The third is data, regenerated daily.
 
-## LaunchDaemon
+## Sync flow
 
-`/Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist` runs at boot and on file-system trigger:
+1. LaunchAgent fires at 04:23 local. (Or operator runs `hither sync`, or `launchctl kickstart gui/$(id -u)/com.johnrandall.hither.sync`.)
+2. `hither-sync.sh` resolves the DSM password for each NAS in `NAS_LIST`:
+   - If `${NAS_UPPER}_DSM_PASSWORD` is set in the env, use it (override path — typical use: `UMBRIDGE_DSM_PASSWORD=$(op read ...) hither sync`).
+   - Otherwise, `security find-internet-password -s <nas> -a <TARGET_USER> -w` reads the password from Keychain. This is the same Keychain entry Finder Cmd-K populates for the SMB mount itself.
+3. `hither-sync.sh` calls the DSM Web API as the target user (`SYNO.API.Auth/login` → `SYNO.FileStation.List/list_share`) — the server-side ACL filter returns exactly the shares that user can read.
+4. The script renders the share list as an autofs indirect-map body.
+5. It diffs against the on-disk `/etc/hither_{nas}`. If unchanged: no-op. If changed: pipes the body into `sudo -n /usr/local/sbin/hither-write-map {host}`.
+6. The wrapper validates the hostname argument against `^[a-z0-9-]+$`, atomically writes `/etc/hither_{host}`, and runs `automount -cv` to pick up the change.
 
-- **RunAtLoad**: re-applies synthetic.conf and auto_master at every boot.
-- **WatchPaths**: monitors `/etc/auto_master` and `/etc/synthetic.conf` for modification. If macOS updates strip Hither's lines, the daemon re-adds them.
-
-The daemon NEVER does network calls (it must run before Tailscale is up at boot) and NEVER stats anything under `/Hither/{host}/`. See [design-decisions.md](design-decisions.md) for why these constraints are load-bearing.
+The whole flow happens on one Mac. No Conductor, no Forgejo, no external secret store.
 
 ## Wrapper
 
-`/usr/local/sbin/hither-write-map` is the only piece of Hither that runs as root in normal operation. It is installed from `sbin/hither-write-map` in this repo.
+`/usr/local/sbin/hither-write-map` is the only piece of Hither that runs as root during normal operation. It is installed from `sbin/hither-write-map` in this repo.
 
 Its job is exactly this:
 
@@ -65,21 +58,19 @@ The hostname whitelist is the security boundary. The original sudoers grant — 
 
 ```mermaid
 sequenceDiagram
-    participant XY as xyOps Conductor (Umbridge)
-    participant XS as xysat worker (Mac)
-    participant FJ as Forgejo (umbridge:8914)
-    participant SH as hither-sync.sh (local tmpfile)
+    participant LA as LaunchAgent (com.johnrandall.hither.sync)
+    participant SH as hither-sync.sh (user shell)
+    participant KC as macOS Keychain
     participant DSM as DSM API (umbridge:5000)
-    participant W as hither-write-map (root)
+    participant W as hither-write-map (root, via sudo -n)
     participant ETC as /etc/hither_umbridge
     participant AF as automountd
     participant USR as User shell
 
-    Note over XY: 04:{minute} daily
-    XY->>XS: fire hither-sync-{host} on target server_id
-    XS->>FJ: curl pinned-SHA script with token
-    FJ-->>XS: hither-sync.sh body
-    XS->>SH: chmod +x; exec with TARGET_USER, NAS_LIST
+    Note over LA: 04:23 daily, gui/<uid>
+    LA->>SH: exec /usr/local/libexec/hither/hither-sync.sh
+    SH->>KC: security find-internet-password -s umbridge -a johntrandall -w
+    KC-->>SH: <password>
     SH->>DSM: SYNO.API.Auth login as TARGET_USER
     DSM-->>SH: SID
     SH->>DSM: SYNO.FileStation.List/list_share
@@ -99,4 +90,13 @@ sequenceDiagram
     AF-->>USR: mounted at /Hither/umbridge/Media
 ```
 
-The data flow is **one-way**: repo → Mac `/etc/`, never Mac `/etc/` → repo. The live `/etc/hither_{host}` files contain actual share names which may include family/PII data; they are never committed. The repo holds structure (bootstrap scripts, wrapper, LaunchDaemon, the sync job source). The live state holds data.
+The data flow is **one-way**: NAS API → local `/etc/`. The live `/etc/hither_{host}` files contain actual share names which may include family/PII data; they are never committed back. The repo holds structure (bootstrap scripts, wrapper, LaunchDaemon plist, LaunchAgent plist template, the sync script source). The live state holds data.
+
+## Defender flow
+
+The LaunchDaemon (`com.johnrandall.hither.bootstrap`) runs at boot and on file-system trigger:
+
+- **RunAtLoad**: re-applies synthetic.conf and auto_master at every boot.
+- **WatchPaths**: monitors `/etc/auto_master` and `/etc/synthetic.conf` for modification. If macOS updates strip Hither's lines, the daemon re-adds them.
+
+The daemon NEVER does network calls and NEVER stats anything under `/Hither/{host}/`. See [design-decisions.md](design-decisions.md) for why these constraints are load-bearing.

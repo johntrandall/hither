@@ -1,41 +1,41 @@
 #!/bin/zsh
 # hither-sync — keep /etc/hither_<nas> current with shares the target
-# DSM user can read, on each managed Mac.
+# DSM user can read.
 #
-# Companion to: admin-technical/conventions/synology-smb-and-mac-mount-strategy.md
-# Architecture: admin-technical/conventions/synology-smb-and-mac-mount-architecture.mermaid
+# This script runs locally on each Mac. It is invoked by:
+#   - The com.johnrandall.hither.sync LaunchAgent (daily, user GUI context).
+#   - `hither sync` (manual fire, user shell).
 #
-# Where this runs:
-#   - Each Mac's xysat worker runs this locally (per ADR-061 model).
-#   - Conductor on Umbridge schedules; it does NOT execute. The work — DSM
-#     API call → /etc/hither_<nas> rewrite → automount reload — is local
-#     to the consuming Mac.
+# It is NOT a server-side script — there is no Hither server. The DSM API
+# call, map rendering, and write-via-wrapper all happen on the consuming
+# Mac, against the NAS over the LAN/Tailscale.
 #
-# Per-host wrapper passes via env:
+# Environment:
 #   TARGET_USER   DSM user whose visible-share-list we mirror (e.g., johntrandall).
 #   NAS_LIST      Space-separated NAS hostnames to sync (e.g., "umbridge").
 #                 (One /etc/hither_<nas> file per entry.)
 #   NAS_PROTO     "http" or "https" for DSM Web API. Default: "http".
 #                 (LAN trust; flip to https when Tailscale-tunneled.)
 #
-# DSM credentials: env-var-first per the chosen credential architecture
-# (projects/service-credential-management/README.md, pivot 2026-05-05).
-# In production, xyOps injects per-NAS env vars from xyOps Secrets:
-#   <NAS_UPPER>_DSM_PASSWORD   e.g. UMBRIDGE_DSM_PASSWORD
-# Fallback for manual / dev invocation: `op item get` against the
-# canonical 1Password title "<NAS> - DSM - <TARGET_USER> (Login)" in
-# vault "JRVIS Infra". The xysat run-as user (infra-agent) typically
-# has no 1P session, so the env-var path is the load-bearing one.
+# DSM credential resolution:
+#   1. Env var ${NAS_UPPER}_DSM_PASSWORD (e.g. UMBRIDGE_DSM_PASSWORD).
+#      Lets the operator override out-of-band — e.g. `UMBRIDGE_DSM_PASSWORD=$(op read ...) hither sync`.
+#   2. macOS Keychain via `security find-internet-password -s <nas> -a <TARGET_USER> -w`.
+#      This is the load-bearing path. The LaunchAgent runs in user GUI
+#      context, which has Keychain access; the same Keychain entry that
+#      Finder Cmd-K uses for the SMB mount itself.
+#
+# No 1Password dependency. For users who keep DSM passwords in 1P,
+# inject via env-var override at invocation time.
 #
 # Calling DSM AS the target user lets the server filter the share
 # list to exactly what that user can read — no admin API + per-share
 # ACL inspection needed.
 #
-# Sudo prerequisites (per Mac, in /etc/sudoers.d/xysat-hither-sync):
-#   infra-agent ALL=(root) NOPASSWD: /usr/local/sbin/hither-write-map ^[a-z0-9-]+$
+# Sudo prerequisites (per Mac, in /etc/sudoers.d/hither-write-map):
+#   <user> ALL=(root) NOPASSWD: /usr/local/sbin/hither-write-map ^[a-z0-9-]+$
 # (Single grant — the wrapper validates ${host}, atomically writes /etc/hither_{host},
-#  and runs automount -cv internally. Closes the path-traversal vulnerability of
-#  the prior `tee /etc/auto_smb_*` wildcard grant.)
+#  and runs automount -cv internally.)
 #
 # Idempotent. Safe to re-run. No-op when nothing changed.
 
@@ -46,10 +46,9 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 TARGET_USER="${TARGET_USER:-johntrandall}"
 NAS_LIST="${NAS_LIST:-umbridge}"
 NAS_PROTO="${NAS_PROTO:-http}"
-OP_VAULT="${OP_VAULT:-JRVIS Infra}"
 
-LOG_DIR="${HOME}/Library/Logs"
-LOG_FILE="${LOG_DIR}/hither-sync.log"
+LOG_DIR="${HOME}/Library/Logs/hither"
+LOG_FILE="${LOG_DIR}/sync.log"
 mkdir -p "${LOG_DIR}"
 
 log() {
@@ -58,9 +57,8 @@ log() {
 
 die() { log "FATAL: $*"; exit 1; }
 
-# Required external tools. `op` is only required for the fallback credential
-# path (manual / dev invocation); env-var-first runtime path doesn't need it.
-for cmd in curl jq sudo; do
+# Required external tools.
+for cmd in curl jq sudo security; do
   command -v "$cmd" >/dev/null || die "missing required tool: $cmd"
 done
 
@@ -73,9 +71,8 @@ dsm_login() {
   # Returns SID on stdout (single line), or non-zero on failure.
   #
   # Credential resolution order:
-  #   1. ${<NAS_UPPER>_DSM_PASSWORD}   ← xyOps Secret injection (runtime path)
-  #   2. ${DSM_PASSWORD}                ← single-NAS convenience override
-  #   3. `op item get` from 1Password   ← manual / dev fallback only
+  #   1. ${<NAS_UPPER>_DSM_PASSWORD}   ← env-var override (manual / scripted)
+  #   2. macOS Keychain (security find-internet-password)  ← LaunchAgent path
   local nas="$1"
   local password=""
   local nas_upper
@@ -85,19 +82,17 @@ dsm_login() {
   # Use eval to stay portable across zsh (script's shebang) and any bash callers.
   eval "password=\${${env_var_name}:-}"
   if [[ -z "$password" ]]; then
-    password="${DSM_PASSWORD:-}"
+    # Keychain lookup. `security find-internet-password -w` prints just the
+    # password to stdout on success, nothing on failure. The -s/-a tuple
+    # matches the same Keychain entry Finder Cmd-K uses for SMB:
+    #   security add-internet-password -s <nas> -a <user> -r 'smb ' -w <pass>
+    # (Finder may also write protocol 'afp '/'cifs'; we don't filter by -r
+    # so any matching server+account pair is acceptable.)
+    password=$(security find-internet-password -s "${nas}" -a "${TARGET_USER}" -w 2>/dev/null) \
+      || { log "  no credential: \$${env_var_name} unset AND no Keychain entry for ${TARGET_USER}@${nas} (try 'security add-internet-password' or prime via Finder Cmd-K)"; return 1; }
   fi
   if [[ -z "$password" ]]; then
-    if ! command -v op >/dev/null; then
-      log "  no credential available: \$${env_var_name} unset, \$DSM_PASSWORD unset, and 'op' CLI missing"
-      return 1
-    fi
-    password=$(op item get "${nas} - DSM - ${TARGET_USER} (Login)" \
-                  --vault "${OP_VAULT}" --fields password --reveal 2>/dev/null) \
-      || { log "  no credential: \$${env_var_name} unset AND op item get failed for '${nas} - DSM - ${TARGET_USER} (Login)' (likely no 1P session for run-as user)"; return 1; }
-  fi
-  if [[ -z "$password" ]]; then
-    log "  empty DSM password — env-var and op both yielded blank"
+    log "  empty DSM password — env-var and Keychain both yielded blank"
     return 1
   fi
 
@@ -139,10 +134,7 @@ dsm_list_smb_readable_shares() {
   # That API requires admin privilege. Calling it as a non-admin user
   # (which is the design — we call AS the target user, by intent) returns
   # error code 105 (insufficient privilege) for every share, which would
-  # cause us to exclude everything. Verified failure mode 2026-05-12.
-  # The original 2026-05-07 filter was architecturally incompatible with
-  # the deployment doc's stated design ("calling AS the target user lets
-  # the DSM server filter the share list — no admin API needed").
+  # cause us to exclude everything.
   #
   # Edge case: FileStation visibility CAN occasionally exceed SMB-mount
   # access — a share may appear here yet fail mount_smbfs with NT-status
@@ -169,7 +161,7 @@ render_map() {
   # Reads share names on stdin, emits an /etc/hither_<nas> file body.
   local nas="$1"
   printf '# /etc/hither_%s — AutoFS indirect map.\n' "${nas}"
-  printf '# MANAGED BY xyOps hither-sync — DO NOT EDIT BY HAND.\n'
+  printf '# MANAGED BY hither sync — DO NOT EDIT BY HAND.\n'
   printf '# Generated: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
   printf '# Target user: %s\n' "${TARGET_USER}"
   printf '# Format: <share-key>  -fstype=smbfs,soft  ://<user>@<host>/<share>\n'
