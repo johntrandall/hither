@@ -83,11 +83,11 @@ hither subscribe <nas> --user <dsm-user>
 ```
 hither bootstrap [--reapply-only|--user-only|--root-only]
                                           Install / re-apply Hither system state
-hither subscribe <nas> --user <dsm-user> [--notify=true|false]
+hither subscribe <nas> --user <dsm-user> [--notify|--no-notify|--notify=true|--notify=false]
                                           Add a NAS, store password in Keychain
 hither unsubscribe <nas> [--purge]        Remove a NAS subscription
 hither list                               Show subscribed NASes + last-sync age
-hither sync [<nas>] [--notify|--no-notify]
+hither sync [<nas>] [--notify|--no-notify|--notify=true|--notify=false]
                                           Manual fire of the daily sync
 hither status                             Daemon + config + mount state
 hither unmount <nas> | <nas>/<share> | all   Force-unmount with umount -f
@@ -140,7 +140,7 @@ The LaunchDaemon never touches the network and never `stat`s anything under `/Hi
 
 See **[docs/architecture.md](docs/architecture.md)** for the full data flow and **[docs/design-decisions.md](docs/design-decisions.md)** for *why* it's built this way.
 
-> **About the LaunchDaemon labels.** Both `Label`s start with `com.johnrandall.` — the original author's reverse-DNS prefix. These labels are baked into existing installs and we don't rename them in v0.4.0 to avoid breaking upgrade paths. They aren't visible to typical users; operators inspecting `launchctl list` will see them.
+> **About the LaunchDaemon labels.** Both `Label`s start with `com.johnrandall.` — the original author's reverse-DNS prefix. These labels are baked into existing installs and we don't rename them in the v0.x series to avoid breaking upgrade paths. They aren't visible to typical users; operators inspecting `launchctl list` will see them.
 
 ## Requirements
 
@@ -154,7 +154,7 @@ Hither itself has no Python, no Node, no Go runtime. It's a few hundred lines of
 
 ## Status
 
-**v0.4.0 — public-release polish.** This is the first release intended for an audience beyond the author. The two-daemon architecture has been stable since v0.2.0, the CLI surface since v0.3.0, and the privacy/leak gate since v0.1.
+**v0.5.0 — share-set change notifications.** Building on the v0.4.0 public-release polish (the first release intended for an audience beyond the author), v0.5 surfaces share-set drift as a native macOS notification: when a NAS-side admin grants or revokes your access to a share, you find out at the next sync rather than via a stale `cd /Hither/<nas>/<share>` failure. The two-daemon architecture has been stable since v0.2.0, the CLI surface since v0.3.0, and the privacy/leak gate since v0.1.
 
 Under active development on the author's primary Mac. The same DSM-API-to-autofs-map flow has been running daily in an earlier form (a centrally-scheduled job) since early May 2026; v0.2.0+ is a self-contained refactor of that flow. **v1.0 will be cut after a clean 30-day burn-in of the LaunchAgent form.** Until then, expect minor changes — the on-disk subscription format and CLI surface are not expected to change incompatibly, but no promises until v1.0.
 

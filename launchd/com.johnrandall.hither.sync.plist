@@ -18,7 +18,7 @@ Operation: stdout → ~/Library/Logs/hither/sync.log; stderr → ~/Library/Logs/
 
 Sibling: com.johnrandall.hither.bootstrap (LaunchDaemon, root context, defends /etc/synthetic.conf + /etc/auto_master against macOS update reverts). The two daemons have non-overlapping roles — defender does local file repair only (no network), sync does the network/API/credential work (no file repair). Splitting them by privilege/context is what makes Hither self-contained on a single Mac.
 
-Note on the Label: `com.johnrandall.hither.sync` carries the original author's name as the reverse-DNS prefix. This is historical; the Label is baked into existing installs and is not renamed in v0.4.0 to avoid breaking upgrade paths.
+Note on the Label: `com.johnrandall.hither.sync` carries the original author's name as the reverse-DNS prefix. This is historical; the Label is baked into existing installs and is not renamed in the v0.x series to avoid breaking upgrade paths.
 
 References: github.com/johntrandall/hither; docs/architecture.md; docs/design-decisions.md "Why a LaunchAgent for sync, not a LaunchDaemon".</string>
 

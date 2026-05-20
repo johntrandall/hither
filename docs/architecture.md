@@ -117,7 +117,7 @@ notify_on_changes = true   # v0.5+; default true for new subscriptions, default 
 
 [meta]
 added = "2026-05-20T07:30:00Z"
-hither_version = "0.5.0"
+hither_version = "<current>"
 ```
 
 This is the **single source of truth** for which NASes this Mac syncs. Adding/removing a subscription is `hither subscribe` / `hither unsubscribe`. Three things change in sync:
@@ -129,3 +129,5 @@ This is the **single source of truth** for which NASes this Mac syncs. Adding/re
 The LaunchAgent's plist on disk holds materialized values for `NAS_LIST` and `TARGET_USER`. The template in the repo (`launchd/com.johnrandall.hither.sync.plist`) holds placeholder values that are overwritten on every `subscribe` / `unsubscribe`. The reason for materializing into the plist instead of reading the TOML at fire time: launchd doesn't run the agent in a shell, so the agent needs its env populated declaratively in the plist.
 
 Multiple subscriptions on one Mac share a single LaunchAgent — there's one daily fire, and `hither-sync.sh` iterates `NAS_LIST` internally. Per-subscription `schedule_hour` and `schedule_minute` are recorded in each TOML but NOT honored by the runtime today: the LaunchAgent fires at whatever schedule the plist template ships with (currently hour 4, minute 23). `hither_refresh_launchagent_env` rewrites the `TARGET_USER` and `NAS_LIST` env vars on every subscribe/unsubscribe but does not touch `StartCalendarInterval`. Per-NAS scheduling is post-v1.0.
+
+> **Design quirk: `HITHER_NOTIFY` is a single global toggle.** Same single-LaunchAgent constraint as `StartCalendarInterval` above: a per-subscription notify gate would require per-NAS env injection we don't have. So `HITHER_NOTIFY` is set to `1` iff ANY subscription has `notify_on_changes = true` (OR-aggregated by `hither_refresh_launchagent_env`). Consequence: if you have multiple subscriptions and want per-NAS notification control, set each subscription's `notify_on_changes` consistently — adding a new subscription with the default `true` will enable notifications for ALL your existing subscriptions on the next sync. The TOML field is per-subscription (forward-compat for a future split) but the runtime gate is global. Per-NAS notify is on the post-v1.0 roadmap.

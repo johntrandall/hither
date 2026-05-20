@@ -29,7 +29,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-HITHER_VERSION="0.5.0"
+HITHER_VERSION="0.5.1"
 VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
 export HITHER_VERSION
 
@@ -179,6 +179,7 @@ bootstrap_root_phase() {
   # /etc/sudoers.d/hither-write-map granting %admin (the generic, public
   # form). This block is a no-op on fresh installs — only runs if the
   # old file is present from an upgrade path.
+  # Legacy file from the pre-v0.2 centrally-scheduled era; remove if present.
   if [[ -f /etc/sudoers.d/xysat-hither-sync ]]; then
     rm -f /etc/sudoers.d/xysat-hither-sync
     echo "[ok] removed legacy /etc/sudoers.d/xysat-hither-sync"
@@ -588,17 +589,20 @@ cmd_sync() {
 
   # All subscriptions. Iterate (assume single TARGET_USER + proto; warned
   # in refresh_launchagent_env for multi-user). HITHER_NOTIFY defaults to
-  # the FIRST subscription's notify_on_changes (matches the single-LaunchAgent
-  # behavior). --notify / --no-notify override.
-  local first_user="" first_proto="" first_notify="false"
+  # any-true across subscriptions — matches hither_refresh_launchagent_env's
+  # OR-aggregation so a manual `hither sync` and a scheduled LaunchAgent
+  # fire behave identically. --notify / --no-notify override.
+  local first_user="" first_proto="" notify_any="0"
   local nas_list="" iter_nas iter_user iter_proto seen_first=0
   while IFS=$'\t' read -r iter_nas iter_user iter_proto _ _; do
     [[ -n "$iter_nas" ]] || continue
     if (( seen_first == 0 )); then
       first_user="$iter_user"
       first_proto="$iter_proto"
-      first_notify="$(hither_sub_read_notify "$(hither_sub_path "$iter_nas")")"
       seen_first=1
+    fi
+    if [[ "$(hither_sub_read_notify "$(hither_sub_path "$iter_nas")")" == "true" ]]; then
+      notify_any="1"
     fi
     if [[ -z "$nas_list" ]]; then nas_list="$iter_nas"
     else nas_list="${nas_list} ${iter_nas}"; fi
@@ -607,10 +611,8 @@ cmd_sync() {
   local hn
   if [[ -n "${notify_override}" ]]; then
     hn="${notify_override}"
-  elif [[ "${first_notify}" == "true" ]]; then
-    hn="1"
   else
-    hn="0"
+    hn="${notify_any}"
   fi
 
   TARGET_USER="${first_user}" NAS_LIST="${nas_list}" NAS_PROTO="${first_proto}" HITHER_NOTIFY="${hn}" \
@@ -889,6 +891,7 @@ cmd_uninstall() {
   rm -f /etc/sudoers.d/hither-write-map \
     && echo "[ok] removed /etc/sudoers.d/hither-write-map"
   # Also clean up the legacy v0.1/v0.2 sudoers file if still present.
+  # Legacy file from the pre-v0.2 centrally-scheduled era; remove if present.
   if [[ -f /etc/sudoers.d/xysat-hither-sync ]]; then
     rm -f /etc/sudoers.d/xysat-hither-sync \
       && echo "[ok] removed legacy /etc/sudoers.d/xysat-hither-sync"

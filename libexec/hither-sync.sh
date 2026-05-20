@@ -270,23 +270,37 @@ fire_notification() {
   local nas="$1" body="$2"
   local title="Hither — ${nas}"
 
-  # Hard cap. Use awk for multibyte-safe truncation (the − minus sign is
-  # 3-byte UTF-8; naive ${var:0:150} could split mid-codepoint).
+  # Hard cap. Truncate to 150 BYTES (macOS notifications truncate display
+  # anyway; multi-byte glyphs at byte 150 may split — acceptable trade-off
+  # for zero-dep, given BWK awk's substr is byte-indexed not codepoint-indexed).
   if (( ${#body} > 150 )); then
     body="$(printf '%s' "${body}" | awk '{print substr($0, 1, 147) "..."}')"
   fi
 
-  # Escape backslashes and double-quotes for the AppleScript string literal.
+  # Escape for AppleScript double-quoted string literals. AppleScript
+  # interpolates ALL of: backslash, double-quote, dollar (in some
+  # contexts via shell-passthrough), and backtick. Escape all four
+  # defensively — the share names that reach this function are bounded
+  # by DSM share-name validation, but cheap insurance.
   local esc_title esc_body
-  esc_title="${title//\\/\\\\}"; esc_title="${esc_title//\"/\\\"}"
-  esc_body="${body//\\/\\\\}";   esc_body="${esc_body//\"/\\\"}"
+  esc_title="${title//\\/\\\\}"
+  esc_title="${esc_title//\"/\\\"}"
+  esc_title="${esc_title//\$/\\\$}"
+  esc_title="${esc_title//\`/\\\`}"
+  esc_body="${body//\\/\\\\}"
+  esc_body="${esc_body//\"/\\\"}"
+  esc_body="${esc_body//\$/\\\$}"
+  esc_body="${esc_body//\`/\\\`}"
 
   if [[ "${HITHER_NOTIFY_DRY_RUN}" == "1" ]]; then
     log "  [notify dry-run] osascript -e 'display notification \"${esc_body}\" with title \"${esc_title}\"'"
     return 0
   fi
 
-  /usr/bin/osascript -e "display notification \"${esc_body}\" with title \"${esc_title}\"" 2>/dev/null || true
+  # 5-second timeout via perl alarm — osascript can hang indefinitely if
+  # Notification Center is wedged. perl ships with macOS; no coreutils
+  # dep. Subshell isolates the alarm so it can't leak to the parent.
+  ( perl -e 'alarm 5; exec @ARGV' /usr/bin/osascript -e "display notification \"${esc_body}\" with title \"${esc_title}\"" ) 2>/dev/null || true
   log "  notification fired: ${title} — ${body}"
 }
 

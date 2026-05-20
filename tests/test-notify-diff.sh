@@ -9,6 +9,11 @@
 # Run: zsh tests/test-notify-diff.sh
 # Exit: 0 on all-pass; 1 on any failure.
 
+if [[ -z "${ZSH_VERSION:-}" ]]; then
+  echo "ERROR: this test requires zsh; run: zsh $0" >&2
+  exit 1
+fi
+
 set -uo pipefail
 
 HERE="${0:A:h}"
@@ -33,7 +38,17 @@ SYNC_SH="${PROJECT_ROOT}/libexec/hither-sync.sh"
 
 # Eval the helper functions into this shell.
 eval "$(extract_function "${SYNC_SH}" extract_share_set_from_map)"
+command -v extract_share_set_from_map >/dev/null || { echo "FATAL: extract_function failed to find extract_share_set_from_map in ${SYNC_SH}"; exit 1; }
 eval "$(extract_function "${SYNC_SH}" compute_change_summary)"
+command -v compute_change_summary >/dev/null || { echo "FATAL: extract_function failed to find compute_change_summary in ${SYNC_SH}"; exit 1; }
+eval "$(extract_function "${SYNC_SH}" fire_notification)"
+command -v fire_notification >/dev/null || { echo "FATAL: extract_function failed to find fire_notification in ${SYNC_SH}"; exit 1; }
+
+# Stub `log` so fire_notification can record its dry-run output without
+# requiring the rest of hither-sync.sh's logging setup.
+NOTIFY_LOG_CAPTURE=""
+log() { NOTIFY_LOG_CAPTURE="${NOTIFY_LOG_CAPTURE}$*"$'\n'; }
+HITHER_NOTIFY_DRY_RUN=1
 
 pass=0
 fail=0
@@ -194,6 +209,44 @@ comm -23 "${tmpdir}/nc_before" "${tmpdir}/nc_after" > "${tmpdir}/nc_removed"
 
 actual_summary="$(compute_change_summary "${tmpdir}/nc_added" "${tmpdir}/nc_removed")"
 report "timestamp churn but stable set → empty summary" "" "${actual_summary}"
+
+# ---------------------------------------------------------------------------
+# Test 5: fire_notification — AppleScript escape robustness
+# ---------------------------------------------------------------------------
+echo "== fire_notification escape robustness (dry-run) =="
+
+# fire_notification in dry-run logs the would-be osascript invocation via
+# the `log` shim defined above. Capture it and assert the escapes look right.
+#
+# Body contains: "  $VAR  ` — every AppleScript-interpolating metachar
+# we escape (backslash is auto-tested by the literal it implies).
+NOTIFY_LOG_CAPTURE=""
+fire_notification "test-nas" 'has "quote", $VAR, and `backtick`' >/dev/null 2>&1
+
+# Expect each metachar to appear escaped in the captured log line.
+# `log` prints the literal output of the would-be osascript -e arg.
+escaped_quote=0; escaped_dollar=0; escaped_backtick=0
+case "${NOTIFY_LOG_CAPTURE}" in
+  *'\"quote\"'*)  escaped_quote=1 ;;
+esac
+case "${NOTIFY_LOG_CAPTURE}" in
+  *'\$VAR'*)  escaped_dollar=1 ;;
+esac
+case "${NOTIFY_LOG_CAPTURE}" in
+  *'\`backtick\`'*)  escaped_backtick=1 ;;
+esac
+
+report "fire_notification escapes double-quote in body" "1" "${escaped_quote}"
+report "fire_notification escapes \$ in body"           "1" "${escaped_dollar}"
+report "fire_notification escapes backtick in body"     "1" "${escaped_backtick}"
+
+# Title is constructed as "Hither — ${nas}"; verify the literal "Hither — "
+# prefix lands in the captured arg (sanity: title slot wired up correctly).
+case "${NOTIFY_LOG_CAPTURE}" in
+  *'Hither — test-nas'*)  title_ok=1 ;;
+  *)                       title_ok=0 ;;
+esac
+report "fire_notification renders title correctly" "1" "${title_ok}"
 
 # ---------------------------------------------------------------------------
 # Summary

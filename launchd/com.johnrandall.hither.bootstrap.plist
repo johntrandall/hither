@@ -16,7 +16,7 @@ Dependencies: requires /usr/local/sbin/hither-write-map to be installed (root-ow
 
 Operation: stdout → /var/log/hither/bootstrap.stdout.log; stderr → /var/log/hither/bootstrap.stderr.log. Use `sudo launchctl print system/com.johnrandall.hither.bootstrap` to inspect state. Use `sudo launchctl kickstart system/com.johnrandall.hither.bootstrap` to fire manually. Use `sudo launchctl bootout system/com.johnrandall.hither.bootstrap` to disable.
 
-Note on the Label: `com.johnrandall.hither.bootstrap` carries the original author's name as the reverse-DNS prefix. This is historical; the Label is baked into existing installs and is not renamed in v0.4.0 to avoid breaking upgrade paths. Operators inspecting `launchctl list` will see the johnrandall prefix; this is expected.
+Note on the Label: `com.johnrandall.hither.bootstrap` carries the original author's name as the reverse-DNS prefix. This is historical; the Label is baked into existing installs and is not renamed in the v0.x series to avoid breaking upgrade paths. Operators inspecting `launchctl list` will see the johnrandall prefix; this is expected.
 
 References: github.com/johntrandall/hither, docs/architecture.md, docs/design-decisions.md.</string>
 

@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.5.1] — 2026-05-20
+
+Iterative-verification round-1 fixes on v0.5.0. All bugs caught before publication.
+
+### Fixed
+- **`tests/test-notify-diff.sh` silently no-op'd under bash.** The shebang says `#!/bin/zsh` but a contributor running `bash tests/test-notify-diff.sh` would see `${0:A:h}: unbound variable` at line 14 (a zsh-only modifier expansion), then exit 0 — a green light that didn't actually run anything. Added an explicit shell-guard that fails loudly when invoked under non-zsh. **Publication-blocker fix.**
+- **`fire_notification` AppleScript escape pass missed `$` and backtick.** AppleScript double-quoted string literals interpolate `\\`, `\"`, `\$`, and `` \` ``. The previous escape covered only the first two. Defensive — share names are bounded by DSM validation, but cheap insurance against a future-self foot-gun. **Publication-blocker fix.**
+- **`fire_notification` could hang the sync if Notification Center is wedged.** Wrapped the osascript invocation in `perl -e 'alarm 5; exec @ARGV' ...` (subshell-isolated) so a hung NC times out at 5 seconds rather than indefinitely. perl ships with macOS; no new dep. **Publication-blocker fix.**
+- **`bin/hither sync` HITHER_NOTIFY default disagreed with the LaunchAgent.** A manual `hither sync` (no flags) used the FIRST subscription's `notify_on_changes`, but the LaunchAgent uses any-true OR-aggregated across subscriptions. Aligned: `cmd_sync` now also any-true OR-aggregates so a manual sync and a scheduled fire behave identically.
+- **False "multibyte-safe" claim in `fire_notification` substr comment.** macOS BWK awk's `substr` is BYTE-indexed, not codepoint-indexed — the comment claimed otherwise. Rephrased the comment to be honest about the trade-off (truncate to 150 bytes, accept multi-byte glyph split at the boundary). Python3 is not guaranteed-present on macOS post-12.3, so we don't reach for it.
+
+### Changed
+- **README Status section** now reflects v0.5.0 share-set notifications (was still pinned at v0.4.0 polish).
+- **README CLI table** documents both `--notify` / `--no-notify` and `--notify=true|false` flag forms for `subscribe` and `sync`. Previously only the `=` form was listed.
+- **Plist `ServiceDescription` strings** (both bootstrap + sync) updated: "not renamed in v0.4.0" → "not renamed in the v0.x series" so the rationale doesn't read as version-specific.
+- **`docs/architecture.md` TOML example** uses `hither_version = "<current>"` placeholder rather than hardcoding the current version.
+- **`bin/hither` legacy-sudoers comments** annotated with "Legacy file from the pre-v0.2 centrally-scheduled era; remove if present" so future readers don't try to revive the xysat-hither-sync pathway.
+
+### Added
+- **`tests/test-launchagent-env.sh`** — closes the test-coverage gap from the iterative-verification test-exhaustiveness verifier. Five cases covering single-true / single-false / all-false / one-true (OR aggregation) / all-true. Asserts `plutil -lint` passes, `HITHER_NOTIFY` reflects OR-aggregation, and `NAS_LIST` / `TARGET_USER` are correctly substituted.
+- **`tests/test-notify-diff.sh` Test 5** — exercises `fire_notification` in dry-run mode against a body containing `"`, `$VAR`, and `` ` ``. Captures the would-be osascript invocation and asserts each metachar is correctly escaped.
+- **`extract_function` sanity check** — `tests/test-notify-diff.sh` now hard-fails with a clear error if `extract_share_set_from_map` / `compute_change_summary` / `fire_notification` aren't defined after eval, rather than silently no-op'ing.
+
+### CI
+- **`.github/workflows/ci.yml`** (renamed from `shellcheck.yml`) — adds a macOS job that runs both test suites. The shellcheck job remains as a parallel job. Tests need `plutil` and the bash + zsh stack; macos-latest runner has them.
+
+### Known design quirk (intentional, post-v1.0 work)
+- **`HITHER_NOTIFY` is a single global toggle, OR-aggregated across subscriptions.** All subs on one Mac share a single LaunchAgent, so a per-subscription notify gate would require per-NAS env injection we don't have. Consequence: a user upgrading from v0.4.x (existing sub stays at default-`false` per `hither_sub_read_notify`'s absent-field rule) and then adding ONE new sub (default `true`) will silently enable notifications for ALL their NASes on the next sync. If you have multiple subs and want per-NAS notification control, set each subscription's `notify_on_changes` consistently. Per-NAS notify is on the post-v1.0 roadmap. The TOML field is per-subscription (forward-compat) but the runtime gate is the global env var.
+
+### Version
+- `bin/hither` `HITHER_VERSION` → `0.5.1`
+- `Formula/hither.rb` `version` → `0.5.1`
+
 ## [0.5.0] — 2026-05-20
 
 Surface share-set changes as macOS notifications. Until now, the only way to find out that a NAS-side admin added or removed a share you can see was to hit `cd /Hither/<nas>/<share>` and get a "No such file" — or to manually `hither list` and notice the count drifting. v0.5 closes that gap with proactive notifications fired through `osascript`.
