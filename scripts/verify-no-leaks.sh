@@ -43,13 +43,11 @@ if [[ -z "${patterns}" ]]; then
   exit 0
 fi
 
-# Exclude .git, backup dirs, and server/ from scan.
-# server/ holds live deployment config (real xyOps server_ids, real 1P vault names,
-# real Tailscale FQDNs) that the manifest and registration script need to function.
-# These are intentional private-repo artifacts; v2 public-release sanitization will
-# template them. The gate's job is to catch UNINTENTIONAL leaks into docs/, bin/,
-# scripts/, bootstrap/ — not to lecture the operational config.
-hits=$(grep -rEl --exclude-dir=.git --exclude-dir='*.pre-*' --exclude-dir=server "${patterns}" "${SCAN_PATH}" 2>/dev/null || true)
+# Exclude .git and backup dirs from scan. Hither v0.2.0 dropped the
+# xyOps-server-side directory (which previously held deployment-specific
+# identifiers and required this gate to skip it). The current repo holds
+# only generic code — every directory should pass the leak check.
+hits=$(grep -rEl --exclude-dir=.git --exclude-dir='*.pre-*' "${patterns}" "${SCAN_PATH}" 2>/dev/null || true)
 
 if [[ -n "${hits}" ]]; then
   echo "[FAIL] privacy patterns matched in:"

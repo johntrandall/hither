@@ -29,7 +29,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-HITHER_VERSION="0.3.0"
+HITHER_VERSION="0.3.1"
 VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
 export HITHER_VERSION
 
@@ -153,6 +153,25 @@ bootstrap_root_phase() {
     "${HITHER_ROOT}/sbin/hither-write-map" \
     /usr/local/sbin/hither-write-map
   echo "[ok] installed /usr/local/sbin/hither-write-map"
+
+  # 3b. Sudoers grant for the wrapper. Validate the source with visudo
+  # BEFORE installing — a malformed sudoers file would lock the user out
+  # of sudo entirely. Install at 0440 root:wheel per sudoers convention.
+  if ! visudo -cf "${HITHER_ROOT}/sudoers/hither-write-map" >/dev/null; then
+    die "${HITHER_ROOT}/sudoers/hither-write-map failed visudo -cf — refusing to install"
+  fi
+  install -m 0440 -o root -g wheel \
+    "${HITHER_ROOT}/sudoers/hither-write-map" \
+    /etc/sudoers.d/hither-write-map
+  echo "[ok] installed /etc/sudoers.d/hither-write-map"
+
+  # 3c. Remove the legacy v0.1/v0.2 sudoers file if present. Old installs
+  # had /etc/sudoers.d/xysat-hither-sync granting infra-agent; v0.3.0 ships
+  # /etc/sudoers.d/hither-write-map granting %admin.
+  if [[ -f /etc/sudoers.d/xysat-hither-sync ]]; then
+    rm -f /etc/sudoers.d/xysat-hither-sync
+    echo "[ok] removed legacy /etc/sudoers.d/xysat-hither-sync"
+  fi
 
   # 4. libexec scripts.
   install -d -m 0755 -o root -g wheel /usr/local/libexec/hither
@@ -780,6 +799,14 @@ cmd_uninstall() {
 
   rm -f /usr/local/sbin/hither-write-map \
     && echo "[ok] removed /usr/local/sbin/hither-write-map"
+
+  rm -f /etc/sudoers.d/hither-write-map \
+    && echo "[ok] removed /etc/sudoers.d/hither-write-map"
+  # Also clean up the legacy v0.1/v0.2 sudoers file if still present.
+  if [[ -f /etc/sudoers.d/xysat-hither-sync ]]; then
+    rm -f /etc/sudoers.d/xysat-hither-sync \
+      && echo "[ok] removed legacy /etc/sudoers.d/xysat-hither-sync"
+  fi
 
   rm -rf /usr/local/libexec/hither \
     && echo "[ok] removed /usr/local/libexec/hither/"

@@ -1,0 +1,34 @@
+# /etc/sudoers.d/hither-write-map
+# Managed by Hither. Grants the consuming user the right to invoke the
+# root-owned map-writer wrapper. The wrapper validates its {host} argument
+# and atomically writes /etc/hither_{host} then runs `automount -cv`.
+# NO direct sudoers entry for `tee` or `automount` — the wrapper is the
+# single privileged surface, closing the path-traversal vulnerability of
+# the prior `tee /etc/auto_smb_*` wildcard grant.
+#
+# Deploy via: sudo install -m 0440 -o root -g wheel \
+#   sudoers/hither-write-map /etc/sudoers.d/hither-write-map && \
+#   sudo visudo -cf /etc/sudoers.d/hither-write-map
+#
+# REGEX ARGUMENT CONSTRAINT — REQUIRES sudo >= 1.9.10
+# ===================================================
+# The `^[a-z0-9-]+$` form below is INTERPRETED AS A REGEX by sudo, not as
+# a fnmatch(3) glob. This is a feature introduced in sudo 1.9.10 (2022-04):
+#   https://www.sudo.ws/releases/stable/#1.9.10
+# Pre-1.9.10 sudo would treat the literal characters `^`, `$`, `[`, `]`,
+# `+` as fnmatch metacharacters or as ordinary literals — neither
+# interpretation matches actual hostnames, so the grant would never
+# activate. macOS Sequoia (15.x) ships sudo 1.9.13p2; Ventura+ also OK.
+#
+# DO NOT replace `^...$` with the visually-similar fnmatch glob `[a-z0-9-]+`
+# thinking it means the same thing — that form would silently fail to
+# match anything because `+` in fnmatch is a literal `+`. The anchors and
+# the `+` quantifier are load-bearing under regex interpretation.
+#
+# %admin: every user in the local 'admin' group on this Mac. macOS makes
+# the first-created user an admin; family Macs typically have one admin
+# user (the family member). For multi-user Macs where only specific users
+# should be able to write hither maps, replace `%admin` with a literal
+# username (e.g., `johntrandall`) or a custom group.
+
+%admin ALL=(root) NOPASSWD: /usr/local/sbin/hither-write-map ^[a-z0-9-]+$

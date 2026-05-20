@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.1] — 2026-05-20
+
+Repo cleanup — the xyOps coupling that v0.2.0 made dead code is now actually deleted, the sudoers file is renamed to match the wrapper it grants, and the bootstrap installs the sudoers grant automatically (was previously a manual operator step).
+
+### Removed
+- `server/register-events.sh` — xyOps event-registration script. Made dead code in v0.2.0; deleted now.
+- `server/hither-sync.manifest.json` — xyOps subscriber list. v0.3.0 replaced this model with `~/.config/hither/subscriptions/<nas>.toml`. Deleted.
+- `server/sudoers/xysat-hither-sync` — the sudoers file's xysat-association naming. Renamed (see below).
+- `server/` directory — now empty, removed.
+- `scripts/verify-no-leaks.sh` no longer has `--exclude-dir=server` since the directory is gone. The leak gate now scans every file in the repo.
+
+### Renamed
+- `server/sudoers/xysat-hither-sync` → `sudoers/hither-write-map`. Name now matches the wrapper it grants (`/usr/local/sbin/hither-write-map`). Sudoers Runas user changed from `infra-agent` (John-personal service account) to `%admin` (generic; the first-created user on any macOS install is in the admin group).
+
+### Added
+- `bin/hither bootstrap` root phase now installs `sudoers/hither-write-map` to `/etc/sudoers.d/hither-write-map` after validating with `visudo -cf`. Previously the operator had to do this manually.
+- `bin/hither bootstrap` also removes the legacy `/etc/sudoers.d/xysat-hither-sync` file if present (clean migration from v0.1/v0.2 installs).
+- `bin/hither uninstall` removes `/etc/sudoers.d/hither-write-map` (and the legacy file if still present).
+
+### Migration for the SusanBones install
+
+`sudo $(which hither) bootstrap` picks up the new sudoers automatically and removes the legacy file.
+
 ## [0.3.0] — 2026-05-20
 
 CLI surface completeness — Hither's per-Mac operator interface, finished. v0.2.0 left the daemons in place but the CLI was still ad-hoc (subscribe-by-hand: edit the plist, `security add-internet-password`, hand-edit auto_master). v0.3.0 ships the full lifecycle as proper subcommands. Subscription state is now a real on-disk artifact at `~/.config/hither/subscriptions/<nas>.toml`, one file per NAS, and every other piece of system state (Keychain entry, `/etc/auto_master` line, LaunchAgent env block, `/etc/hither_<nas>` map) flows from there.
