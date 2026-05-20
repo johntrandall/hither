@@ -69,14 +69,17 @@ sudo "$(which hither)" bootstrap
 # User phase — installs ~/Library/LaunchAgents/com.johnrandall.hither.sync.plist
 hither bootstrap --user-only
 
-# One-time Keychain prime (skip if Finder Cmd-K already saved it)
-security add-internet-password -s umbridge -a johntrandall -r 'smb ' -w
+# Add your first NAS subscription. Prompts for the DSM password and stores
+# it in macOS Keychain (the same entry Finder Cmd-K populates for SMB).
+hither subscribe umbridge --user johntrandall
 ```
 
-The root phase performs five steps:
+That's it — `subscribe` writes `~/.config/hither/subscriptions/umbridge.toml`, writes the Keychain entry, applies the `/etc/auto_master` line via `sudo`, refreshes the LaunchAgent's env block so the new NAS appears in `NAS_LIST`, and fires an initial sync. Subsequent days fire automatically at 04:23 local.
+
+The bootstrap root phase performs:
 
 1. Adds the `Hither` synthetic-root symlink entry to `/etc/synthetic.conf` and materializes `/Hither` (via `apfs.util -t`).
-2. Applies the initial `/etc/auto_master` entries for each subscribed host (currently: `umbridge`).
+2. For each existing subscription, applies the `/etc/auto_master` entry. (First-time installs have none — the loop is a no-op and prints a hint to run `hither subscribe`.)
 3. Installs the root-owned wrapper `sbin/hither-write-map` to `/usr/local/sbin/hither-write-map`.
 4. Installs the bootstrap scripts and `hither-sync.sh` to `/usr/local/libexec/hither/`.
 5. Installs and loads the LaunchDaemon at `/Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist`.
@@ -85,13 +88,52 @@ The user phase installs `~/Library/LaunchAgents/com.johnrandall.hither.sync.plis
 
 `bootstrap --reapply-only` (root phase only) skips steps 3-5. It is what the boot-time LaunchDaemon runs at WatchPaths trigger — file repair only.
 
-### Manual fire
+## Recipes
 
 ```bash
-hither sync    # exec /usr/local/libexec/hither/hither-sync.sh in user shell
+# Subscribe to a second NAS (HTTPS, custom schedule)
+hither subscribe hedwig --user johntrandall --proto https --schedule-hour 5
+
+# List subscriptions and their last-sync age
+hither list
+
+# Tabular health/state view (daemons, files, per-sub mounts, stale detection)
+hither status
+
+# Fire the daily sync now, for one NAS or all subscriptions
+hither sync                # all subs
+hither sync umbridge       # one sub
+
+# Look at the sync log
+hither logs                # all entries
+hither logs umbridge       # filter to one NAS
+hither logs --tail         # follow
+
+# Force-unmount stuck shares
+hither unmount umbridge/Media     # one share
+hither unmount umbridge           # every mounted share under /Hither/umbridge/
+hither unmount all                # every Hither-managed mount
+
+# Unmount + reload autofs
+hither remount umbridge
+
+# Remove a NAS subscription (keeps the Keychain entry — re-subscribe is easy)
+hither unsubscribe umbridge
+
+# Same, but also wipe the Keychain entry (hard to undo)
+hither unsubscribe umbridge --purge
+
+# Reverse the entire install (user phase, then root phase)
+hither uninstall
+sudo "$(which hither)" uninstall
+# --purge also removes ~/.config/hither/ and every Keychain entry
+hither uninstall --purge
+sudo "$(which hither)" uninstall --purge
 ```
 
-Same effect as `launchctl kickstart gui/$(id -u)/com.johnrandall.hither.sync`. Refuses to run as root (Keychain access requires user GUI session). Override the DSM password out-of-band via env var:
+### Manual sync with an out-of-band password
+
+`hither sync` refuses to run as root (Keychain access requires the user GUI session). To override the password via env var, e.g. from a password manager:
 
 ```bash
 UMBRIDGE_DSM_PASSWORD=$(op read 'op://<vault>/<item>/password') hither sync
@@ -100,11 +142,12 @@ UMBRIDGE_DSM_PASSWORD=$(op read 'op://<vault>/<item>/password') hither sync
 ## Verify
 
 ```bash
-hither doctor
-hither verify-no-leaks
+hither doctor              # mount probes, Keychain, daemons, TM exclusion
+hither status              # state snapshot (no probes)
+hither verify-no-leaks     # pre-commit privacy gate
 ```
 
-`doctor` reports the state of the three pieces of system configuration (synthetic root, auto_master entries, hither_* map files) and confirms the LaunchDaemon is loaded. `verify-no-leaks` checks that no live share-path or PII data has been committed back into the repo.
+`doctor` reports the state of the three pieces of system configuration (synthetic root, auto_master entries, hither_* map files), probes a sample mount, and confirms both daemons are loaded. `verify-no-leaks` checks that no live share-path or PII data has been committed back into the repo.
 
 ## Sub-projects
 
@@ -128,11 +171,12 @@ hither/
 │   ├── glossary.md              # terms for non-John readers
 │   └── roadmap.md               # internal planning (v0.2 → v1.0)
 ├── bin/
-│   └── hither                   # CLI (bootstrap, sync, doctor, verify-no-leaks, version)
+│   └── hither                   # CLI (bootstrap, subscribe, list, sync, status, …)
 ├── sbin/
 │   └── hither-write-map         # root-owned wrapper, installed at /usr/local/sbin/
 ├── libexec/
-│   └── hither-sync.sh           # daily share enumeration; installed at /usr/local/libexec/hither/
+│   ├── hither-sync.sh           # daily share enumeration; installed at /usr/local/libexec/hither/
+│   └── hither-lib.sh            # shared bash helpers sourced by bin/hither (subscription I/O, LaunchAgent refresh)
 ├── bootstrap/
 │   ├── add-synthetic-root.sh    # installs to /usr/local/libexec/hither/; appends "Hither<TAB>System/Volumes/Data/Hither" to /etc/synthetic.conf
 │   ├── apply-auto-master.sh     # installs to /usr/local/libexec/hither/; appends /Hither/{host} lines to /etc/auto_master

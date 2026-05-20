@@ -3,8 +3,17 @@ _hither() {
   local -a subcommands
   subcommands=(
     'bootstrap:install or re-apply Hither system state'
+    'subscribe:add a NAS subscription'
+    'unsubscribe:remove a NAS subscription'
+    'list:show subscribed NASes'
+    'sync:manually fire the sync (all subs or one)'
+    'status:show daemon + config + mount state'
+    'unmount:force-unmount shares'
+    'remount:unmount + automount -cv'
+    'logs:show sync log'
     'doctor:check mount health'
     'verify-no-leaks:run pre-commit privacy gate'
+    'uninstall:reverse of bootstrap'
     'version:print version'
     'help:show help'
   )

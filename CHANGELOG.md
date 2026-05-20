@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.3.0] — 2026-05-20
+
+CLI surface completeness — Hither's per-Mac operator interface, finished. v0.2.0 left the daemons in place but the CLI was still ad-hoc (subscribe-by-hand: edit the plist, `security add-internet-password`, hand-edit auto_master). v0.3.0 ships the full lifecycle as proper subcommands. Subscription state is now a real on-disk artifact at `~/.config/hither/subscriptions/<nas>.toml`, one file per NAS, and every other piece of system state (Keychain entry, `/etc/auto_master` line, LaunchAgent env block, `/etc/hither_<nas>` map) flows from there.
+
+### Added
+- `hither subscribe <nas> --user <dsm-user> [--proto http|https] [--schedule-hour H] [--schedule-minute M]` — add a NAS subscription. Prompts for the DSM password (or reads it from piped stdin), stores it via `security add-internet-password -s <nas> -a <user> -r 'smb '`, writes the subscription TOML, applies the `/etc/auto_master` line via `sudo -n` (best-effort; falls back to a hint if sudo cache is empty), re-renders the LaunchAgent's `NAS_LIST` / `TARGET_USER` env block, and fires an initial sync. Validates the NAS name against the same `^[a-z0-9-]+$` regex enforced by `/usr/local/sbin/hither-write-map`.
+- `hither unsubscribe <nas> [--purge]` — reverse of subscribe. Best-effort unmounts any current mounts, deletes the subscription file, removes the `/etc/auto_master` line (sudo), removes `/etc/hither_<nas>`, and refreshes the LaunchAgent env. `--purge` also deletes the Keychain entry (documented as irreversible).
+- `hither list` — tabular subscription view: NAS, user, proto, schedule, share count (from `/etc/hither_<nas>` line count), last sync age (from file mtime).
+- `hither status` — one-screen state snapshot: LaunchDaemon + LaunchAgent loaded state, `/etc/synthetic.conf` form check, `/etc/auto_master` entry count, `/Hither` symlink check, per-subscription summary including stale-mount detection (`timeout 2 stat -f '%t' <mountpoint>` per mounted share).
+- `hither unmount <nas> | <nas>/<share> | all` — `umount -f` shares Hither manages. `all` walks every subscription. Best-effort; reports each umount's exit code.
+- `hither remount <nas> | all` — `hither unmount` + `sudo automount -cv` to kick autofs's map cache.
+- `hither logs [<nas>] [--tail]` — `cat ~/Library/Logs/hither/sync.log` with optional grep-filter to one NAS and optional `tail -F`.
+- `hither uninstall [--purge]` — reverse of `bootstrap`, two phases (user + root). Removes LaunchAgent, LaunchDaemon, `/usr/local/sbin/hither-write-map`, `/usr/local/libexec/hither/`, the `/Hither` line from `/etc/synthetic.conf`, all `/Hither/` lines from `/etc/auto_master`, and the `/etc/hither_*` maps. `--purge` also removes `~/.config/hither/` and every per-NAS Keychain entry. Documented that synthetic-root removal only takes effect after reboot.
+- `libexec/hither-lib.sh` — shared bash helpers sourced by `bin/hither`. Houses subscription file I/O (`hither_sub_read_field`, `hither_sub_write`, `hither_sub_list_names`, `hither_sub_iter`) and `hither_refresh_launchagent_env` which re-renders the agent plist from the current subscription set and reloads it via `launchctl bootout` + `bootstrap`. Avoids taking a TOML-parser dependency; uses `awk` against the flat `key = "value"` form.
+
+### Changed
+- **Subscriber list is no longer hardcoded.** `bin/hither bootstrap` (root phase) now iterates `~/.config/hither/subscriptions/*.toml` instead of a literal `for host in umbridge`. When sudo'd, it reads from `$SUDO_USER`'s home, not root's. First-time installs (no subscriptions yet) skip the auto_master loop and print a hint to run `hither subscribe` next.
+- **`hither sync` accepts an optional NAS argument.** Without args: syncs every subscription (TARGET_USER + NAS_LIST + NAS_PROTO derived from the current subscription files). With `<nas>`: syncs that one only. Backwards-compat fallback: if no subscriptions exist, fall through to `hither-sync.sh`'s env-var defaults — keeps mid-migration installs working.
+- **`hither bootstrap --user-only` refreshes the LaunchAgent env block from subscriptions.** If any subscriptions exist, the installer pipes the plist through `awk` to substitute `NAS_LIST` and `TARGET_USER` before loading. If none exist, the placeholder values stay in the plist; `hither subscribe` will overwrite them later.
+- `bin/hither` `usage()` rewritten to cover all subcommands with one-line descriptions. `bin/hither` source grew from 254 to ~620 lines (most of the growth is comments + the `usage()` heredoc; logic is partitioned into `cmd_<name>` functions).
+- Bash + zsh completions updated. Bash completion now dynamically reads `~/.config/hither/subscriptions/*.toml` to suggest NAS names for `unmount` / `remount` / `sync`.
+- `VERSION` → `0.3.0`.
+
+### Notes
+- `server/` directory NOT removed — Phase 4 cleanup is still pending until the xyOps event burn-in concludes. The `verify-no-leaks` `--exclude-dir=server` carve-out stays.
+- `bootstrap` retains its name (not renamed to `install`) — minimizing churn for v0.3.0; the rename is deferred to v0.4.0 per the roadmap.
+- Multi-user-per-Mac is not supported. If subscriptions specify different `user` values, `refresh_launchagent_env` warns and uses the first. Multi-user is in the post-v1.0 "Out-of-scope" list.
+
+### Test cycle (manual, on the dev host)
+```
+hither version                                  → "hither 0.3.0"
+hither subscribe BAD-NAME --user u <<< pw       → exits non-zero ("invalid — must match …")
+hither subscribe foo --user u --schedule-hour 25 → exits non-zero ("must be 0-23")
+hither subscribe testnas --user testuser <<< pw → writes ~/.config/hither/subscriptions/testnas.toml, stores Keychain
+hither list                                     → shows testnas | testuser | http | 04:23 | - | never
+hither unsubscribe testnas --purge              → deletes file + Keychain entry; subsequent `list` is empty
+hither status                                   → runs on a 0-subscription Mac without crashing
+hither verify-no-leaks                          → exits 0
+bash -n bin/hither libexec/hither-lib.sh        → clean
+```
+
 ## [0.2.0] — 2026-05-20
 
 Drop the xyOps coupling. Hither is now a self-contained per-Mac tool: the daily sync runs as a LaunchAgent in user GUI context, reads DSM credentials from macOS Keychain, and has zero external orchestration dependencies. This is the architecture target distribution work needs (per `docs/roadmap.md`'s "design north star").

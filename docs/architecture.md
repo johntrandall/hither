@@ -100,3 +100,30 @@ The LaunchDaemon (`com.johnrandall.hither.bootstrap`) runs at boot and on file-s
 - **WatchPaths**: monitors `/etc/auto_master` and `/etc/synthetic.conf` for modification. If macOS updates strip Hither's lines, the daemon re-adds them.
 
 The daemon NEVER does network calls and NEVER stats anything under `/Hither/{host}/`. See [design-decisions.md](design-decisions.md) for why these constraints are load-bearing.
+
+## Subscriptions
+
+A "subscription" is one NAS that this Mac syncs from. Subscription state lives at `~/.config/hither/subscriptions/<nas>.toml`, one file per NAS:
+
+```toml
+[subscription]
+name = "umbridge"
+user = "johntrandall"
+nas_proto = "http"
+schedule_hour = 4
+schedule_minute = 23
+
+[meta]
+added = "2026-05-20T07:30:00Z"
+hither_version = "0.3.0"
+```
+
+This is the **single source of truth** for which NASes this Mac syncs. Adding/removing a subscription is `hither subscribe` / `hither unsubscribe`. Three things change in sync:
+
+1. The TOML file at `~/.config/hither/subscriptions/<nas>.toml` (created/deleted).
+2. The DSM password in macOS Keychain (`security add-internet-password` / `delete-internet-password`).
+3. The LaunchAgent's `EnvironmentVariables` block (re-rendered from the current subscription set, then `launchctl bootout` + `bootstrap` to reload).
+
+The LaunchAgent's plist on disk holds materialized values for `NAS_LIST` and `TARGET_USER`. The template in the repo (`launchd/com.johnrandall.hither.sync.plist`) holds placeholder values that are overwritten on every `subscribe` / `unsubscribe`. The reason for materializing into the plist instead of reading the TOML at fire time: launchd doesn't run the agent in a shell, so the agent needs its env populated declaratively in the plist.
+
+Multiple subscriptions on one Mac share a single LaunchAgent — there's one daily fire, and `hither-sync.sh` iterates `NAS_LIST` internally. Per-subscription schedules are recorded in the TOML but not currently honored by the runtime (the LaunchAgent's schedule comes from the first subscription's TOML, or from the plist template if no subscriptions exist). Per-NAS schedule support is post-v1.0.

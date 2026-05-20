@@ -2,11 +2,20 @@
 # SPDX-License-Identifier: MIT
 # bin/hither — CLI entry point.
 #
-# Subcommands:
-#   bootstrap [--reapply-only]   Install/repair Hither on this Mac
-#   sync                         Manual fire of the daily sync (uses LaunchAgent's logic)
+# Subcommands (v0.3.0):
+#   bootstrap [--reapply-only|--user-only|--root-only]
+#                                Install/repair Hither on this Mac
+#   subscribe <nas> --user <u>   Add a NAS subscription
+#   unsubscribe <nas> [--purge]  Remove a NAS subscription
+#   list                         Show subscribed NASes
+#   sync [<nas>]                 Manual fire of the sync (all subs or one)
+#   status                       Show daemon + config + mount state
+#   unmount <nas>|<n>/<s>|all    Force-unmount shares
+#   remount <nas>|all            Unmount + automount -cv
+#   logs [<nas>] [--tail]        Tail or grep the sync log
 #   doctor                       Check mount health, Keychain, TM exclusion
-#   verify-no-leaks              Pre-commit privacy gate (scripts/verify-no-leaks.sh)
+#   verify-no-leaks              Pre-commit privacy gate
+#   uninstall [--purge]          Reverse of bootstrap
 #   version                      Print version
 #
 # Resolves its own location via readlink -f so the symlink at
@@ -20,54 +29,85 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-VERSION="0.2.0"
+HITHER_VERSION="0.3.0"
+VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
+export HITHER_VERSION
+
+# --- Source shared subscription/config helpers ---
+# shellcheck source=../libexec/hither-lib.sh
+. "${HITHER_ROOT}/libexec/hither-lib.sh"
 
 usage() {
   cat <<EOF
-hither ${VERSION} — lazy mounter for personal Mac fleets
+hither ${HITHER_VERSION} — lazy mounter for personal Mac fleets
 
 Usage:
-  hither bootstrap [--reapply-only]
+  hither bootstrap [--reapply-only|--user-only|--root-only]
       Install (or re-apply) /etc/synthetic.conf, /etc/auto_master, the
       hither-write-map wrapper, the LaunchDaemon (revert defender), and
       the LaunchAgent (daily sync). Idempotent.
 
-      Bootstrap has two phases:
-        - Root phase: file installs to /etc/, /usr/local/sbin, /usr/local/libexec,
-          and /Library/LaunchDaemons. MUST be run via sudo with absolute path.
-        - User phase: LaunchAgent install to ~/Library/LaunchAgents and
-          launchctl bootstrap into the user's GUI session. MUST be run as
-          the consuming user (NOT sudo) — LaunchAgents live in user home.
-
-      Recommended invocation:
+      Two phases:
         sudo \$(which hither) bootstrap        # root phase
-        hither bootstrap --user-only           # user phase (different shell)
+        hither bootstrap --user-only           # user phase
 
-      With --reapply-only, skips wrapper/libexec/LaunchAgent install (used by
-      the boot-time LaunchDaemon, which only needs file re-application).
+  hither subscribe <nas> --user <dsm-user> [--proto http|https]
+                                            [--schedule-hour H]
+                                            [--schedule-minute M]
+      Add a NAS subscription. Prompts for the DSM password (or reads it
+      from stdin if piped), stores it in macOS Keychain, writes the
+      subscription file to ~/.config/hither/subscriptions/<nas>.toml,
+      and triggers an initial sync.
 
-  hither sync
-      Manually fire the daily sync — runs /usr/local/libexec/hither/hither-sync.sh
-      in the current user shell. Uses Keychain for DSM password unless
-      \${NAS_UPPER}_DSM_PASSWORD is set. Equivalent to
-      \`launchctl kickstart gui/\$(id -u)/com.johnrandall.hither.sync\`.
+  hither unsubscribe <nas> [--purge]
+      Remove a NAS subscription. Unmounts any shares, deletes the
+      subscription file, and removes /etc/auto_master + /etc/hither_<nas>.
+      --purge also deletes the Keychain entry (irreversible).
+
+  hither list
+      Tabular view of subscriptions: NAS / user / proto / schedule /
+      share count / last sync age.
+
+  hither sync [<nas>]
+      Fire the sync now. Without args: every subscription. With <nas>:
+      that one only.
+
+  hither status
+      One-screen status: both daemons' load state, file state,
+      per-subscription state including stale-mount detection.
+
+  hither unmount <nas> | <nas>/<share> | all
+      Force-unmount with umount -f.
+
+  hither remount <nas> | all
+      Unmount + automount -cv (sudo). Useful after autofs gets stuck.
+
+  hither logs [<nas>] [--tail]
+      Show the sync log. With <nas>: filter to entries for that NAS.
+      With --tail: follow the log.
 
   hither doctor
-      Verify mounts are working: positive mount probe per share,
-      Keychain entry present, Time Machine exclusion applied, both
-      LaunchDaemon and LaunchAgent loaded.
+      Verify mounts, Keychain, TM exclusion, both daemons loaded.
 
   hither verify-no-leaks [<path>]
-      Run the pre-commit privacy gate. Reads patterns from
-      ~/.config/hither/leak-patterns.txt. Defaults to scanning
-      \${HITHER_ROOT}.
+      Run the pre-commit privacy gate.
+
+  hither uninstall [--purge]
+      Reverse of bootstrap. Two phases (user + root); --purge also
+      removes subscription config and Keychain entries. Synthetic-root
+      removal takes effect only after reboot.
 
   hither version
 
 EOF
 }
 
-# --- bootstrap: root phase (file installs into /etc, /usr/local, /Library) ---
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# =============================================================================
+# bootstrap
+# =============================================================================
+
 bootstrap_root_phase() {
   local reapply_only="$1"
 
@@ -76,30 +116,45 @@ bootstrap_root_phase() {
   # 1. Install/re-apply synthetic.conf entry + materialize /Hither
   bash "${HITHER_ROOT}/bootstrap/add-synthetic-root.sh"
 
-  # 2. Install/re-apply /etc/auto_master entry for each subscribed host
-  # For v0.2, the subscriber list is a single host: umbridge.
-  # v0.3 reads from ~/.config/hither/subscriptions/<nas>.toml.
-  for host in umbridge; do
-    bash "${HITHER_ROOT}/bootstrap/apply-auto-master.sh" "${host}"
-  done
+  # 2. Install/re-apply /etc/auto_master entry for each subscribed host.
+  #    v0.3 reads the subscriber list from ~/.config/hither/subscriptions/.
+  #    First-time installs have an empty list — the loop is a no-op and we
+  #    print a hint to run `hither subscribe`.
+  #
+  #    NOTE: when running as root via sudo, $HOME is root's home. We want
+  #    the invoking user's subscription dir, which sudo passes via SUDO_USER.
+  local target_home="${HOME}"
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    target_home="$(eval echo "~${SUDO_USER}")"
+  fi
+  local subs_dir="${target_home}/.config/hither/subscriptions"
+  local found_any=0
+  if [[ -d "${subs_dir}" ]]; then
+    local sub
+    for sub in "${subs_dir}"/*.toml; do
+      [[ -f "$sub" ]] || continue
+      local host
+      host="$(basename "$sub" .toml)"
+      bash "${HITHER_ROOT}/bootstrap/apply-auto-master.sh" "${host}"
+      found_any=1
+    done
+  fi
+  if [[ "${found_any}" -eq 0 ]]; then
+    echo "[hint] no subscriptions found at ${subs_dir} — run 'hither subscribe <nas> --user <dsm-user>' after bootstrap"
+  fi
 
   if [[ "$reapply_only" -eq 1 ]]; then
     echo "=== bootstrap root phase complete (reapply-only) ==="
     return 0
   fi
 
-  # 3. Install the wrapper script (sbin/hither-write-map)
+  # 3. Wrapper script.
   install -m 0755 -o root -g wheel \
     "${HITHER_ROOT}/sbin/hither-write-map" \
     /usr/local/sbin/hither-write-map
   echo "[ok] installed /usr/local/sbin/hither-write-map"
 
-  # 4. Install the bootstrap scripts + the sync script to /usr/local/libexec/hither.
-  #    LaunchDaemon (boot-time, root) needs the bootstrap scripts there because
-  #    user-home repos may be mode-700 / unreadable / relocated. LaunchAgent
-  #    (daily, user) needs hither-sync.sh there for the same reason — the
-  #    plist's ProgramArguments points at this system path, not a user-home
-  #    repo clone.
+  # 4. libexec scripts.
   install -d -m 0755 -o root -g wheel /usr/local/libexec/hither
   install -m 0755 -o root -g wheel \
     "${HITHER_ROOT}/bootstrap/add-synthetic-root.sh" \
@@ -112,7 +167,7 @@ bootstrap_root_phase() {
     /usr/local/libexec/hither/hither-sync.sh
   echo "[ok] installed /usr/local/libexec/hither/{add-synthetic-root,apply-auto-master,hither-sync}.sh"
 
-  # 5. Install and load the LaunchDaemon (depends on step 4 paths)
+  # 5. LaunchDaemon.
   bash "${HITHER_ROOT}/bootstrap/install-launchdaemon.sh"
 
   echo "=== bootstrap root phase complete ==="
@@ -121,69 +176,56 @@ bootstrap_root_phase() {
   echo "      hither bootstrap --user-only"
 }
 
-# --- bootstrap: user phase (LaunchAgent install into ~/Library/LaunchAgents) ---
 bootstrap_user_phase() {
   if [[ $EUID -eq 0 ]]; then
-    echo "ERROR: bootstrap --user-only must NOT be run as root — LaunchAgents live in user home" >&2
-    exit 1
+    die "bootstrap --user-only must NOT be run as root — LaunchAgents live in user home"
   fi
 
   echo "=== Hither bootstrap — user phase (uid=$(id -u)) ==="
 
-  # Source plist must exist at the install-time-templated path. The bootstrap
-  # root phase puts hither-sync.sh at /usr/local/libexec/hither/. The plist
-  # template references it directly there; we just need to substitute __HOME__.
   local agent_dir="${HOME}/Library/LaunchAgents"
-  local agent_dst="${agent_dir}/com.johnrandall.hither.sync.plist"
+  local agent_dst="${HITHER_AGENT_PATH}"
   local agent_src="${HITHER_ROOT}/launchd/com.johnrandall.hither.sync.plist"
 
-  if [[ ! -f "${agent_src}" ]]; then
-    echo "ERROR: LaunchAgent template not found at ${agent_src}" >&2
-    exit 1
-  fi
+  [[ -f "${agent_src}" ]] || die "LaunchAgent template not found at ${agent_src}"
 
   mkdir -p "${agent_dir}"
   mkdir -p "${HOME}/Library/Logs/hither"
 
-  # Substitute __HOME__ → $HOME at install time. launchd does NOT expand env
-  # vars in plist paths; the substitution has to happen here.
+  # Substitute __HOME__ at install time. launchd does NOT expand env vars
+  # in plist paths.
   sed "s|__HOME__|${HOME}|g" "${agent_src}" > "${agent_dst}.tmp"
   chmod 0644 "${agent_dst}.tmp"
   mv "${agent_dst}.tmp" "${agent_dst}"
   echo "[ok] installed ${agent_dst}"
 
-  # Validate before loading — a malformed plist would otherwise fail at
-  # `launchctl bootstrap` with a less-actionable error.
-  if ! plutil -lint "${agent_dst}" >/dev/null; then
-    echo "ERROR: ${agent_dst} failed plutil -lint after install" >&2
-    exit 1
-  fi
+  plutil -lint "${agent_dst}" >/dev/null || die "${agent_dst} failed plutil -lint after install"
 
-  # Reload: bootout (ignore error if not loaded), then bootstrap. Bootstrap
-  # without prior bootout is a no-op if the daemon is already loaded with a
-  # different content — same gotcha that bit the LaunchDaemon in v0.1.1.
-  local domain="gui/$(id -u)"
-  launchctl bootout "${domain}/com.johnrandall.hither.sync" 2>/dev/null || true
-  if launchctl bootstrap "${domain}" "${agent_dst}"; then
-    echo "[ok] LaunchAgent loaded into ${domain}"
+  # If we have subscriptions, re-render the env block now. Otherwise the
+  # plist sits with the template values (TARGET_USER=johntrandall,
+  # NAS_LIST=umbridge) which are placeholders — they won't be used until
+  # the user runs `hither subscribe`, which calls refresh_launchagent_env.
+  if [[ -n "$(hither_sub_list_names)" ]]; then
+    hither_refresh_launchagent_env
   else
-    echo "ERROR: launchctl bootstrap ${domain} failed" >&2
-    exit 1
+    local domain="gui/$(id -u)"
+    launchctl bootout "${domain}/${HITHER_AGENT_LABEL}" 2>/dev/null || true
+    launchctl bootstrap "${domain}" "${agent_dst}" \
+      || die "launchctl bootstrap ${domain} failed"
+    echo "[ok] LaunchAgent loaded into ${domain} (no subscriptions yet — use 'hither subscribe')"
   fi
 
   echo "=== bootstrap user phase complete ==="
 }
 
 cmd_bootstrap() {
-  local reapply_only=0
-  local user_only=0
-  local root_only=0
+  local reapply_only=0 user_only=0 root_only=0
   for arg in "$@"; do
     case "$arg" in
       --reapply-only) reapply_only=1 ;;
       --user-only)    user_only=1 ;;
       --root-only)    root_only=1 ;;
-      *) echo "ERROR: unknown arg to bootstrap: $arg" >&2; exit 2 ;;
+      *) die "unknown arg to bootstrap: $arg" ;;
     esac
   done
 
@@ -192,7 +234,6 @@ cmd_bootstrap() {
     return
   fi
 
-  # Default: root phase. EUID check.
   if [[ $EUID -ne 0 ]]; then
     echo "ERROR: bootstrap requires root — run via: sudo \$(which hither) bootstrap" >&2
     echo "       Or run just the user phase (no sudo): hither bootstrap --user-only" >&2
@@ -200,26 +241,478 @@ cmd_bootstrap() {
   fi
 
   bootstrap_root_phase "$reapply_only"
-
-  if [[ $root_only -eq 1 ]]; then
-    return
-  fi
-  # Don't auto-run user phase from the root phase — sudo's EUID is 0 and the
-  # LaunchAgent would land in root's home. Operator runs --user-only separately.
+  [[ $root_only -eq 1 ]] && return
 }
+
+# =============================================================================
+# subscribe / unsubscribe / list
+# =============================================================================
+
+cmd_subscribe() {
+  if [[ $EUID -eq 0 ]]; then
+    die "'hither subscribe' must NOT be run as root — Keychain write needs user session"
+  fi
+
+  local nas="" user="" proto="http" hour="4" minute="23"
+  if [[ $# -lt 1 ]]; then
+    die "usage: hither subscribe <nas> --user <dsm-user> [--proto http|https] [--schedule-hour H] [--schedule-minute M]"
+  fi
+  nas="$1"; shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --user)            user="$2"; shift 2 ;;
+      --proto)           proto="$2"; shift 2 ;;
+      --schedule-hour)   hour="$2"; shift 2 ;;
+      --schedule-minute) minute="$2"; shift 2 ;;
+      *) die "unknown arg to subscribe: $1" ;;
+    esac
+  done
+
+  hither_validate_nas_name "${nas}" \
+    || die "nas name '${nas}' invalid — must match ^[a-z0-9-]+\$"
+  [[ -n "${user}" ]] \
+    || die "--user <dsm-user> is required"
+  [[ "${proto}" == "http" || "${proto}" == "https" ]] \
+    || die "--proto must be 'http' or 'https' (got '${proto}')"
+  if ! [[ "${hour}" =~ ^[0-9]+$ ]] || (( hour < 0 || hour > 23 )); then
+    die "--schedule-hour must be 0-23 (got '${hour}')"
+  fi
+  if ! [[ "${minute}" =~ ^[0-9]+$ ]] || (( minute < 0 || minute > 59 )); then
+    die "--schedule-minute must be 0-59 (got '${minute}')"
+  fi
+
+  if hither_sub_exists "${nas}"; then
+    echo "[warn] subscription ${nas} already exists at $(hither_sub_path "${nas}") — overwriting"
+  fi
+
+  # Read password. Pipe-detection: if stdin is not a TTY, slurp one line
+  # from it (test pattern: `hither subscribe foo --user u <<< 'pw'`).
+  local password=""
+  if [[ ! -t 0 ]]; then
+    IFS= read -r password
+  else
+    printf 'DSM password for %s@%s (input hidden): ' "${user}" "${nas}" >&2
+    IFS= read -rs password
+    echo >&2
+  fi
+  [[ -n "${password}" ]] || die "empty password — refusing to store"
+
+  # Store credential. Use -U so a re-subscribe overwrites cleanly.
+  if ! security add-internet-password -U \
+      -s "${nas}" -a "${user}" -r 'smb ' \
+      -w "${password}" 2>/dev/null; then
+    die "security add-internet-password failed for ${user}@${nas}"
+  fi
+  echo "[ok] Keychain entry stored for ${user}@${nas}"
+
+  # Write subscription file.
+  hither_sub_write "${nas}" "${user}" "${proto}" "${hour}" "${minute}"
+  echo "[ok] wrote $(hither_sub_path "${nas}")"
+
+  # Apply auto_master entry. Requires sudo. We attempt sudo -n first; if
+  # that fails, document the next step and don't block.
+  if [[ -x /usr/local/libexec/hither/apply-auto-master.sh ]]; then
+    if sudo -n /usr/local/libexec/hither/apply-auto-master.sh "${nas}" >/dev/null 2>&1; then
+      echo "[ok] /etc/auto_master entry applied (sudo -n succeeded)"
+    else
+      echo "[hint] /etc/auto_master not updated automatically — run:"
+      echo "       sudo /usr/local/libexec/hither/apply-auto-master.sh ${nas}"
+      echo "       (Or re-run 'sudo \$(which hither) bootstrap --reapply-only')"
+    fi
+  else
+    echo "[hint] /usr/local/libexec/hither/apply-auto-master.sh not installed — run 'sudo \$(which hither) bootstrap' first"
+  fi
+
+  # Refresh LaunchAgent env block to include the new NAS.
+  hither_refresh_launchagent_env || echo "[warn] LaunchAgent refresh failed; sync will use stale NAS_LIST until next 'hither bootstrap --user-only'"
+
+  # Trigger initial sync (just this NAS).
+  echo "[run] initial sync for ${nas}"
+  if [[ -x /usr/local/libexec/hither/hither-sync.sh ]]; then
+    TARGET_USER="${user}" NAS_LIST="${nas}" NAS_PROTO="${proto}" \
+      /usr/local/libexec/hither/hither-sync.sh \
+      || echo "[warn] initial sync exited non-zero — check ~/Library/Logs/hither/sync.log"
+  else
+    echo "[hint] /usr/local/libexec/hither/hither-sync.sh not installed — run 'sudo \$(which hither) bootstrap' first"
+  fi
+
+  echo "=== subscribed to ${nas} ==="
+}
+
+cmd_unsubscribe() {
+  if [[ $EUID -eq 0 ]]; then
+    die "'hither unsubscribe' must NOT be run as root"
+  fi
+
+  local nas="" purge=0
+  if [[ $# -lt 1 ]]; then
+    die "usage: hither unsubscribe <nas> [--purge]"
+  fi
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --purge) purge=1; shift ;;
+      *)
+        if [[ -z "$nas" ]]; then
+          nas="$1"; shift
+        else
+          die "unexpected arg: $1"
+        fi
+        ;;
+    esac
+  done
+  [[ -n "$nas" ]] || die "usage: hither unsubscribe <nas> [--purge]"
+
+  hither_validate_nas_name "${nas}" \
+    || die "nas name '${nas}' invalid — must match ^[a-z0-9-]+\$"
+
+  # 1. Best-effort unmount of any currently-mounted shares.
+  if [[ -d "/Hither/${nas}" ]]; then
+    local mp
+    while IFS= read -r mp; do
+      [[ -n "$mp" ]] || continue
+      echo "[run] umount -f ${mp}"
+      umount -f "${mp}" 2>/dev/null || true
+    done < <(mount | awk -v p="/Hither/${nas}/" '$0 ~ "on "p {for(i=1;i<=NF;i++) if($i=="on"){print $(i+1); break}}')
+  fi
+
+  # 2. Delete subscription file.
+  if hither_sub_exists "${nas}"; then
+    hither_sub_delete "${nas}"
+    echo "[ok] removed $(hither_sub_path "${nas}")"
+  else
+    echo "[skip] no subscription file at $(hither_sub_path "${nas}")"
+  fi
+
+  # 3. Remove /etc/auto_master line (needs sudo).
+  if grep -qE "^/Hither/${nas}[[:space:]]" /etc/auto_master 2>/dev/null; then
+    if sudo -n sed -i.bak "/^\\/Hither\\/${nas}[[:space:]]/d" /etc/auto_master 2>/dev/null; then
+      echo "[ok] removed /Hither/${nas} line from /etc/auto_master"
+      sudo -n /usr/sbin/automount -cv >/dev/null 2>&1 || true
+    else
+      echo "[hint] /etc/auto_master line still present — run:"
+      echo "       sudo sed -i.bak '/^\\/Hither\\/${nas}[[:space:]]/d' /etc/auto_master && sudo automount -cv"
+    fi
+  fi
+
+  # 4. Remove /etc/hither_<nas>.
+  if [[ -f "/etc/hither_${nas}" ]]; then
+    if sudo -n rm -f "/etc/hither_${nas}" "/etc/hither_${nas}.needs-reload" 2>/dev/null; then
+      echo "[ok] removed /etc/hither_${nas}"
+    else
+      echo "[hint] /etc/hither_${nas} still present — run: sudo rm /etc/hither_${nas}"
+    fi
+  fi
+
+  # 5. Refresh LaunchAgent env (or note that nothing's left).
+  hither_refresh_launchagent_env || true
+
+  # 6. --purge: delete Keychain entry.
+  if [[ $purge -eq 1 ]]; then
+    if security delete-internet-password -s "${nas}" >/dev/null 2>&1; then
+      echo "[ok] --purge: deleted Keychain entry for ${nas}"
+    else
+      echo "[skip] --purge: no Keychain entry found for ${nas}"
+    fi
+  else
+    echo "[hint] Keychain entry preserved. To delete: hither unsubscribe ${nas} --purge"
+  fi
+
+  echo "=== unsubscribed from ${nas} ==="
+}
+
+cmd_list() {
+  local nas user proto hour minute map shares last_sync last_age_h
+  local count=0
+  printf '%-12s %-16s %-6s %-9s %-7s %s\n' \
+    "NAS" "USER" "PROTO" "SCHEDULE" "SHARES" "LAST SYNC"
+  while IFS=$'\t' read -r nas user proto hour minute; do
+    [[ -n "$nas" ]] || continue
+    count=$((count + 1))
+
+    # SHARES: count non-comment, non-blank lines in /etc/hither_<nas>.
+    map="/etc/hither_${nas}"
+    if [[ -r "${map}" ]]; then
+      shares=$(grep -cvE '^[[:space:]]*(#|$)' "${map}" 2>/dev/null || echo 0)
+    else
+      shares="-"
+    fi
+
+    # LAST SYNC: mtime of /etc/hither_<nas>.
+    if [[ -r "${map}" ]]; then
+      last_sync=$(stat -f '%m' "${map}" 2>/dev/null || echo "")
+      if [[ -n "${last_sync}" ]]; then
+        local now age_min
+        now=$(date +%s)
+        age_min=$(( (now - last_sync) / 60 ))
+        if (( age_min < 60 )); then
+          last_age_h="${age_min}m ago"
+        elif (( age_min < 1440 )); then
+          last_age_h="$(( age_min / 60 ))h ago"
+        else
+          last_age_h="$(( age_min / 1440 ))d ago"
+        fi
+      else
+        last_age_h="-"
+      fi
+    else
+      last_age_h="never"
+    fi
+
+    printf '%-12s %-16s %-6s %02d:%02d     %-7s %s\n' \
+      "$nas" "$user" "$proto" "$hour" "$minute" "$shares" "$last_age_h"
+  done < <(hither_sub_iter)
+
+  if [[ ${count} -eq 0 ]]; then
+    echo
+    echo "(no subscriptions — run: hither subscribe <nas> --user <dsm-user>)"
+  fi
+}
+
+# =============================================================================
+# sync (extended) / status / unmount / remount / logs
+# =============================================================================
 
 cmd_sync() {
   if [[ $EUID -eq 0 ]]; then
-    echo "ERROR: 'hither sync' must NOT be run as root — Keychain access requires user GUI session" >&2
-    exit 1
+    die "'hither sync' must NOT be run as root — Keychain access requires user GUI session"
   fi
-  if [[ ! -x /usr/local/libexec/hither/hither-sync.sh ]]; then
-    echo "ERROR: /usr/local/libexec/hither/hither-sync.sh not installed — run: sudo \$(which hither) bootstrap" >&2
-    exit 1
+  [[ -x /usr/local/libexec/hither/hither-sync.sh ]] \
+    || die "/usr/local/libexec/hither/hither-sync.sh not installed — run: sudo \$(which hither) bootstrap"
+
+  local target_nas="${1:-}"
+  local subs
+  subs="$(hither_sub_list_names)"
+
+  if [[ -z "${subs}" && -z "${target_nas}" ]]; then
+    # Backwards-compat: if no subscriptions exist, fall through to the
+    # script's env-var defaults. Lets `hither sync` work mid-migration
+    # for an existing v0.2 install that hasn't been re-subscribed yet.
+    echo "[hint] no subscriptions — falling back to env-var defaults from hither-sync.sh"
+    exec /usr/local/libexec/hither/hither-sync.sh
   fi
-  # Pass through env (TARGET_USER, NAS_LIST, etc.) — script has sensible defaults.
-  exec /usr/local/libexec/hither/hither-sync.sh "$@"
+
+  if [[ -n "${target_nas}" ]]; then
+    hither_validate_nas_name "${target_nas}" \
+      || die "nas name '${target_nas}' invalid"
+    hither_sub_exists "${target_nas}" \
+      || die "no subscription for ${target_nas} — run: hither subscribe ${target_nas} --user <dsm-user>"
+    local path user proto
+    path="$(hither_sub_path "${target_nas}")"
+    user="$(hither_sub_read_field "${path}" user)"
+    proto="$(hither_sub_read_field "${path}" nas_proto)"
+    TARGET_USER="${user}" NAS_LIST="${target_nas}" NAS_PROTO="${proto}" \
+      exec /usr/local/libexec/hither/hither-sync.sh
+  fi
+
+  # All subscriptions. Iterate (assume single TARGET_USER + proto; warned
+  # in refresh_launchagent_env for multi-user).
+  local first_user="" first_proto="" nas_list="" iter_nas iter_user iter_proto
+  while IFS=$'\t' read -r iter_nas iter_user iter_proto _ _; do
+    [[ -n "$iter_nas" ]] || continue
+    [[ -z "$first_user" ]]  && first_user="$iter_user"
+    [[ -z "$first_proto" ]] && first_proto="$iter_proto"
+    if [[ -z "$nas_list" ]]; then nas_list="$iter_nas"
+    else nas_list="${nas_list} ${iter_nas}"; fi
+  done < <(hither_sub_iter)
+
+  TARGET_USER="${first_user}" NAS_LIST="${nas_list}" NAS_PROTO="${first_proto}" \
+    exec /usr/local/libexec/hither/hither-sync.sh
 }
+
+cmd_status() {
+  echo "Hither ${HITHER_VERSION}"
+  echo
+
+  # --- Daemons ---
+  local ld_state ag_state ld_last ag_last ag_next
+  if sudo -n launchctl print system/com.johnrandall.hither.bootstrap >/dev/null 2>&1; then
+    ld_state="loaded"
+  elif launchctl print system/com.johnrandall.hither.bootstrap >/dev/null 2>&1; then
+    ld_state="loaded"
+  else
+    ld_state="NOT loaded"
+  fi
+
+  if launchctl print "gui/$(id -u)/com.johnrandall.hither.sync" >/dev/null 2>&1; then
+    ag_state="loaded"
+  else
+    ag_state="NOT loaded"
+  fi
+  ld_last="(check /var/log/hither/)"
+  ag_last="(check ~/Library/Logs/hither/sync.log)"
+  ag_next="04:23 next"
+
+  printf '  %-46s %-12s %s\n' "com.johnrandall.hither.bootstrap" "${ld_state}" "${ld_last}"
+  printf '  %-46s %-12s %s   %s\n' "com.johnrandall.hither.sync" "${ag_state}" "${ag_last}" "${ag_next}"
+  echo
+
+  # --- Files ---
+  if grep -qE '^Hither[[:space:]]' /etc/synthetic.conf 2>/dev/null; then
+    if grep -qE $'^Hither\tSystem/Volumes/Data/Hither$' /etc/synthetic.conf; then
+      printf '  %-46s %s\n' "/etc/synthetic.conf" "ok (symlink form)"
+    else
+      printf '  %-46s %s\n' "/etc/synthetic.conf" "WARN (non-symlink form)"
+    fi
+  else
+    printf '  %-46s %s\n' "/etc/synthetic.conf" "MISSING Hither entry"
+  fi
+
+  local am_count
+  am_count=$(grep -cE '^/Hither/' /etc/auto_master 2>/dev/null || echo 0)
+  printf '  %-46s %s\n' "/etc/auto_master" "ok (${am_count} /Hither/ entries)"
+
+  if [[ -L /Hither ]]; then
+    printf '  %-46s %s\n' "/Hither" "ok -> $(readlink /Hither)"
+  elif [[ -d /Hither ]]; then
+    printf '  %-46s %s\n' "/Hither" "ok (dir form)"
+  else
+    printf '  %-46s %s\n' "/Hither" "MISSING"
+  fi
+  echo
+
+  # --- Subscriptions ---
+  local count=0 nas user proto hour minute mount_count stale_count
+  while IFS=$'\t' read -r nas user proto hour minute; do
+    [[ -n "$nas" ]] || continue
+    count=$((count + 1))
+
+    local map="/etc/hither_${nas}"
+    local shares="-"
+    local last_age="never"
+    if [[ -r "$map" ]]; then
+      shares=$(grep -cvE '^[[:space:]]*(#|$)' "$map" 2>/dev/null || echo 0)
+      local mt now age_min
+      mt=$(stat -f '%m' "$map" 2>/dev/null || echo "")
+      if [[ -n "$mt" ]]; then
+        now=$(date +%s); age_min=$(( (now - mt) / 60 ))
+        if (( age_min < 60 )); then last_age="${age_min}m ago"
+        elif (( age_min < 1440 )); then last_age="$(( age_min / 60 ))h ago"
+        else last_age="$(( age_min / 1440 ))d ago"; fi
+      fi
+    fi
+
+    mount_count=0; stale_count=0
+    local mp
+    while IFS= read -r mp; do
+      [[ -n "$mp" ]] || continue
+      mount_count=$((mount_count + 1))
+      if ! timeout 2 stat -f '%t' "${mp}" >/dev/null 2>&1; then
+        stale_count=$((stale_count + 1))
+      fi
+    done < <(mount | awk -v p="/Hither/${nas}/" '$0 ~ "on "p {for(i=1;i<=NF;i++) if($i=="on"){print $(i+1); break}}')
+
+    printf '  %-12s ok   %s shares    last_sync %s    %d mounted, %d stale\n' \
+      "$nas" "$shares" "$last_age" "$mount_count" "$stale_count"
+  done < <(hither_sub_iter)
+
+  if [[ ${count} -eq 0 ]]; then
+    echo "  (no subscriptions — run: hither subscribe <nas> --user <dsm-user>)"
+  fi
+}
+
+# Helper: list currently-mounted paths under /Hither/<nas>/
+hither_mounts_under() {
+  local nas="$1"
+  mount | awk -v p="/Hither/${nas}/" '$0 ~ "on "p {for(i=1;i<=NF;i++) if($i=="on"){print $(i+1); break}}'
+}
+
+cmd_unmount() {
+  [[ $# -ge 1 ]] || die "usage: hither unmount <nas> | <nas>/<share> | all"
+  local target="$1"
+
+  do_umount() {
+    local mp="$1"
+    if umount -f "${mp}" 2>/dev/null; then
+      echo "  [ok] umount -f ${mp}"
+    else
+      echo "  [warn] umount -f ${mp} (rc=$?)"
+    fi
+  }
+
+  if [[ "${target}" == "all" ]]; then
+    local nas
+    while IFS= read -r nas; do
+      [[ -n "$nas" ]] || continue
+      echo "== ${nas} =="
+      local mp
+      while IFS= read -r mp; do
+        [[ -n "$mp" ]] || continue
+        do_umount "${mp}"
+      done < <(hither_mounts_under "${nas}")
+    done < <(hither_sub_list_names)
+    return
+  fi
+
+  if [[ "${target}" == */* ]]; then
+    local nas="${target%%/*}"
+    local share="${target#*/}"
+    hither_validate_nas_name "${nas}" || die "invalid nas name in '${target}'"
+    do_umount "/Hither/${nas}/${share}"
+    return
+  fi
+
+  hither_validate_nas_name "${target}" || die "invalid nas name '${target}'"
+  echo "== ${target} =="
+  local mp
+  while IFS= read -r mp; do
+    [[ -n "$mp" ]] || continue
+    do_umount "${mp}"
+  done < <(hither_mounts_under "${target}")
+}
+
+cmd_remount() {
+  [[ $# -ge 1 ]] || die "usage: hither remount <nas> | all"
+  cmd_unmount "$1"
+  echo "== reload autofs =="
+  if sudo /usr/sbin/automount -cv >/dev/null 2>&1; then
+    echo "  [ok] automount -cv"
+  else
+    echo "  [warn] automount -cv failed (sudo cached creds expired?)"
+  fi
+}
+
+cmd_logs() {
+  local log_file="${HOME}/Library/Logs/hither/sync.log"
+  local tail=0 target_nas=""
+  for arg in "$@"; do
+    case "$arg" in
+      --tail) tail=1 ;;
+      *)
+        if [[ -z "${target_nas}" ]]; then
+          target_nas="$arg"
+        else
+          die "unexpected arg: $arg"
+        fi
+        ;;
+    esac
+  done
+
+  [[ -f "${log_file}" ]] \
+    || die "no log file at ${log_file} — has the LaunchAgent fired yet?"
+
+  if [[ -n "${target_nas}" ]]; then
+    hither_validate_nas_name "${target_nas}" \
+      || die "nas name '${target_nas}' invalid"
+  fi
+
+  if [[ $tail -eq 1 ]]; then
+    if [[ -n "${target_nas}" ]]; then
+      exec tail -F "${log_file}" | grep --line-buffered -E "(processing ${target_nas}|hither_${target_nas})"
+    else
+      exec tail -F "${log_file}"
+    fi
+  fi
+
+  if [[ -n "${target_nas}" ]]; then
+    grep -E "(processing ${target_nas}|hither_${target_nas})" "${log_file}" || true
+  else
+    cat "${log_file}"
+  fi
+}
+
+# =============================================================================
+# doctor / verify-no-leaks / uninstall / version
+# =============================================================================
 
 cmd_doctor() {
   bash "${HITHER_ROOT}/scripts/doctor.sh" "$@"
@@ -229,11 +722,95 @@ cmd_verify_no_leaks() {
   bash "${HITHER_ROOT}/scripts/verify-no-leaks.sh" "$@"
 }
 
-cmd_version() {
-  echo "hither ${VERSION}"
+cmd_uninstall() {
+  local purge=0
+  for arg in "$@"; do
+    case "$arg" in
+      --purge) purge=1 ;;
+      *) die "unknown arg to uninstall: $arg" ;;
+    esac
+  done
+
+  # --- User phase ---
+  if [[ $EUID -ne 0 ]]; then
+    echo "=== Hither uninstall — user phase (uid=$(id -u)) ==="
+    local domain="gui/$(id -u)"
+    launchctl bootout "${domain}/${HITHER_AGENT_LABEL}" 2>/dev/null \
+      && echo "[ok] LaunchAgent booted out" \
+      || echo "[skip] LaunchAgent was not loaded"
+    if [[ -f "${HITHER_AGENT_PATH}" ]]; then
+      rm -f "${HITHER_AGENT_PATH}"
+      echo "[ok] removed ${HITHER_AGENT_PATH}"
+    fi
+
+    if [[ $purge -eq 1 ]]; then
+      local nas
+      while IFS= read -r nas; do
+        [[ -n "$nas" ]] || continue
+        security delete-internet-password -s "${nas}" >/dev/null 2>&1 \
+          && echo "[ok] --purge: deleted Keychain entry for ${nas}" \
+          || echo "[skip] --purge: no Keychain entry for ${nas}"
+      done < <(hither_sub_list_names)
+      if [[ -d "${HITHER_CONFIG_DIR}" ]]; then
+        # Use `trash` if available so it's recoverable.
+        if command -v trash >/dev/null 2>&1; then
+          trash "${HITHER_CONFIG_DIR}" \
+            && echo "[ok] --purge: trashed ${HITHER_CONFIG_DIR}"
+        else
+          rm -rf "${HITHER_CONFIG_DIR}" \
+            && echo "[ok] --purge: removed ${HITHER_CONFIG_DIR}"
+        fi
+      fi
+    fi
+
+    echo
+    echo "Next: run the root phase to remove system files:"
+    echo "      sudo \$(which hither) uninstall${purge:+ --purge}"
+    return
+  fi
+
+  # --- Root phase ---
+  echo "=== Hither uninstall — root phase ==="
+
+  launchctl bootout system/com.johnrandall.hither.bootstrap 2>/dev/null \
+    && echo "[ok] LaunchDaemon booted out" \
+    || echo "[skip] LaunchDaemon was not loaded"
+  rm -f /Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist \
+    && echo "[ok] removed /Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist"
+
+  rm -f /usr/local/sbin/hither-write-map \
+    && echo "[ok] removed /usr/local/sbin/hither-write-map"
+
+  rm -rf /usr/local/libexec/hither \
+    && echo "[ok] removed /usr/local/libexec/hither/"
+
+  # Strip /Hither lines from /etc/synthetic.conf and /etc/auto_master.
+  if [[ -f /etc/synthetic.conf ]]; then
+    sed -i.bak '/^Hither[[:space:]]/d' /etc/synthetic.conf \
+      && echo "[ok] removed Hither line from /etc/synthetic.conf (.bak preserved)"
+  fi
+  if [[ -f /etc/auto_master ]]; then
+    sed -i.bak '/^\/Hither\//d' /etc/auto_master \
+      && echo "[ok] removed /Hither lines from /etc/auto_master (.bak preserved)"
+    /usr/sbin/automount -cv >/dev/null 2>&1 || true
+  fi
+
+  # /etc/hither_* maps + markers (best-effort).
+  rm -f /etc/hither_* 2>/dev/null && echo "[ok] removed /etc/hither_* maps"
+
+  echo
+  echo "[note] /Hither synthetic root removal takes effect only after reboot."
+  echo "       The directory will remain visible until the next boot rebuilds /etc/synthetic.conf state."
 }
 
-# --- Dispatch ---
+cmd_version() {
+  echo "hither ${HITHER_VERSION}"
+}
+
+# =============================================================================
+# Dispatch
+# =============================================================================
+
 if [[ $# -eq 0 ]]; then
   usage
   exit 1
@@ -243,11 +820,19 @@ subcmd="$1"
 shift
 
 case "$subcmd" in
-  bootstrap)        cmd_bootstrap "$@" ;;
-  sync)             cmd_sync "$@" ;;
-  doctor)           cmd_doctor "$@" ;;
-  verify-no-leaks)  cmd_verify_no_leaks "$@" ;;
+  bootstrap)          cmd_bootstrap "$@" ;;
+  subscribe)          cmd_subscribe "$@" ;;
+  unsubscribe)        cmd_unsubscribe "$@" ;;
+  list)               cmd_list "$@" ;;
+  sync)               cmd_sync "$@" ;;
+  status)             cmd_status "$@" ;;
+  unmount)            cmd_unmount "$@" ;;
+  remount)            cmd_remount "$@" ;;
+  logs)               cmd_logs "$@" ;;
+  doctor)             cmd_doctor "$@" ;;
+  verify-no-leaks)    cmd_verify_no_leaks "$@" ;;
+  uninstall)          cmd_uninstall "$@" ;;
   version|--version|-v) cmd_version ;;
-  help|--help|-h)   usage ;;
-  *)                echo "ERROR: unknown subcommand '${subcmd}'" >&2; usage; exit 2 ;;
+  help|--help|-h)     usage ;;
+  *)                  echo "ERROR: unknown subcommand '${subcmd}'" >&2; usage; exit 2 ;;
 esac
