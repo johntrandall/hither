@@ -77,3 +77,35 @@ Two non-obvious rules govern what the LaunchDaemon may and may not do. Both are 
 Hither is asymmetric on purpose. Bootstrap scripts, the wrapper, the LaunchDaemon plist, the sync script — all version-controlled. The output of the sync script — `/etc/hither_{host}` files on each Mac — is *runtime data*, not source. It contains live share names and SMB URLs that may include PII.
 
 The repo holds **structure**. The live filesystem holds **data**. The `verify-no-leaks.sh` script enforces this boundary by scanning the repo for patterns that look like committed live-map content.
+
+## Why `/etc/synthetic.conf` is written in symlink form, not directory form
+
+`synthetic.conf` accepts two grammars per `man synthetic.conf`:
+
+- Single-column (`Hither`) creates an empty stub directory at `/Hither`.
+- Two-column (`Hither<TAB>System/Volumes/Data/Hither`) creates a symlink at `/Hither` pointing to the given target.
+
+The single-column form looks simpler and was the v0.1.0 default. It is broken in practice. The Sealed System Volume (SSV) on macOS Sequoia mounts `/` read-only after boot; a stub directory created there inherits that read-only property and cannot host autofs mounts. The first `cd /Hither/umbridge/foo` after boot returns a "Read-only file system" error from autofs's mount-trigger machinery.
+
+The two-column symlink form redirects the synthetic root to `/System/Volumes/Data/Hither`, which lives on the writable Data volume. Autofs mounts on that target succeed normally.
+
+This was discovered post-v1 ship: production had been manually edited by the operator to the symlink form, but `bootstrap/add-synthetic-root.sh` still wrote the broken directory form. The v0.1.1 fix aligns the script with the operator's correction so the LaunchDaemon's revert-defender restores the *correct* form if macOS ever wipes `/etc/synthetic.conf`.
+
+## Why bootstrap scripts live at `/usr/local/libexec/hither/`
+
+The v0.1.0 LaunchDaemon `ProgramArguments` invoked `/bin/bash /Users/johnrandall/dev/hither/bootstrap/add-synthetic-root.sh ...`. That works, but creates two problems:
+
+1. **Mode-700 user home.** On Sequoia, `/Users/johnrandall/` may be mode 0700 (the default for new accounts on this version). The LaunchDaemon runs as root, so it can read; but the dependency on a user-home path is brittle — repo relocation, account rename, FileVault unlock state on first boot, etc., all become potential failure modes for a system service.
+2. **Wrong ownership domain.** A root-executed daemon should not depend on files writable by a non-root user. The user could `rm -rf ~/dev/hither/` and silently break the daemon at next fire.
+
+The v0.1.1 layout copies the bootstrap scripts into `/usr/local/libexec/hither/` (root-owned, mode 0755) during `hither bootstrap`, matching the existing pattern for the root wrapper at `/usr/local/sbin/hither-write-map`. The repo at `~/dev/hither/` remains the source of truth; `hither bootstrap` is the install step that propagates source → system path.
+
+`/usr/local/libexec/` is the FHS-aligned location for "binaries executed by other programs, not directly by users." It is the right home for daemon-invoked scripts.
+
+## Why a `.needs-reload` marker file on automount failure
+
+The v0.1.0 wrapper had a subtle stuck-state bug. The sync script's diff comparison (`current_body == desired_body`) is between the on-disk map and the desired map. If `mv -f tmp target` succeeded but `automount -cv` failed afterward, the on-disk file matched the desired content — so the *next* sync run saw `current == desired` and skipped re-invocation entirely. The autofs cache stayed stale until the Mac rebooted.
+
+The v0.1.1 wrapper writes `/etc/hither_${host}.needs-reload` (root-owned, 644) when `automount -cv` fails after a successful map write. `hither-sync.sh::apply_map_if_changed` checks for the marker BEFORE the diff comparison. If present, the wrapper is re-invoked unconditionally — which gives `automount -cv` another shot. The success path clears the marker. So the next-sync horizon for recovering from a transient autofs hiccup is the regular cadence (daily) rather than the next reboot.
+
+Alternative considered and rejected: bumping the on-disk file's mtime via `touch`. That changes nothing autofs observes — autofs reloads on `automount -cv`, not on file-mtime — so it wouldn't actually help. A marker file checked by the script that *does* invoke `automount -cv` is the cleanest path.
