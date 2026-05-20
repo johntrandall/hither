@@ -62,6 +62,18 @@ TARGET_USER="${TARGET_USER:-PLACEHOLDER_USER}"
 NAS_LIST="${NAS_LIST:-PLACEHOLDER_NAS}"
 NAS_PROTO="${NAS_PROTO:-http}"
 
+# HITHER_NOTIFY: "1" to fire macOS user notifications when the share-set
+# changes between syncs (shares added or removed). Default "0" (silent)
+# preserves v0.4.x behavior. Set by hither_refresh_launchagent_env from
+# the user's subscription set (notify_on_changes field), or by the CLI
+# flags --notify / --no-notify in `bin/hither sync`.
+HITHER_NOTIFY="${HITHER_NOTIFY:-0}"
+
+# HITHER_NOTIFY_DRY_RUN: test-only escape hatch. When "1", the notification
+# is NOT fired via osascript; instead the would-be invocation is logged.
+# Used by tests/test-notify-diff.sh. End-users should not set this.
+HITHER_NOTIFY_DRY_RUN="${HITHER_NOTIFY_DRY_RUN:-0}"
+
 LOG_DIR="${HOME}/Library/Logs/hither"
 LOG_FILE="${LOG_DIR}/sync.log"
 mkdir -p "${LOG_DIR}"
@@ -188,10 +200,103 @@ render_map() {
   done
 }
 
+# ---------------------------------------------------------------------------
+# Share-set diff (v0.5) — surface added/removed shares via notification
+# ---------------------------------------------------------------------------
+
+extract_share_set_from_map() {
+  # Reads an /etc/hither_<nas> map body on stdin, prints sorted share names
+  # (first whitespace-delimited token of each non-comment, non-blank line).
+  #
+  # Render-time format: `<share>  -fstype=smbfs,soft ://<user>@<host>/<share>`
+  # — so $1 is the share key.
+  awk '/^[[:space:]]*#/ {next} /^[[:space:]]*$/ {next} {print $1}' | sort -u
+}
+
+compute_change_summary() {
+  # Args: <added-file> <removed-file>
+  # Both files are sorted share-name lists, one per line. Either may be
+  # empty. Prints a human-readable summary on stdout suitable for the
+  # body of a macOS notification. Capped at ~150 chars (macOS truncates).
+  #
+  # Empty input on both sides: prints empty (caller should not fire).
+  local added_file="$1" removed_file="$2"
+  local added_count=0 removed_count=0
+  # Count non-blank lines. AVOID `grep -c ... || echo 0` — that's the
+  # v0.4.1 pre-publication bug: grep prints "0" AND exits non-zero on
+  # zero matches, so the || branch runs and you get "0\n0" in the
+  # capture, which breaks arithmetic context. Use awk: it always exits 0
+  # and prints exactly what we asked for.
+  if [[ -s "${added_file}" ]]; then
+    added_count=$(awk 'NF { c++ } END { print c+0 }' "${added_file}")
+  fi
+  if [[ -s "${removed_file}" ]]; then
+    removed_count=$(awk 'NF { c++ } END { print c+0 }' "${removed_file}")
+  fi
+
+  if (( added_count == 0 && removed_count == 0 )); then
+    printf ''
+    return 0
+  fi
+
+  # Compact form when total changes <= 3: enumerate names.
+  # Otherwise: numeric summary.
+  if (( added_count + removed_count <= 3 )); then
+    # paste(1) on macOS does NOT accept multi-char delimiters via -d;
+    # we get only the first character. Use awk to assemble ", "-joined
+    # CSVs explicitly.
+    local added_csv removed_csv summary=""
+    added_csv=$(awk 'NF { if (out) out = out ", " $0; else out = $0 } END { print out }' "${added_file}" 2>/dev/null)
+    removed_csv=$(awk 'NF { if (out) out = out ", " $0; else out = $0 } END { print out }' "${removed_file}" 2>/dev/null)
+    if [[ -n "${added_csv}" && -n "${removed_csv}" ]]; then
+      summary="+ ${added_csv} / − ${removed_csv}"
+    elif [[ -n "${added_csv}" ]]; then
+      summary="+ ${added_csv}"
+    else
+      summary="− ${removed_csv}"
+    fi
+    printf '%s\n' "${summary}"
+  else
+    printf '+ %d new, − %d removed\n' "${added_count}" "${removed_count}"
+  fi
+}
+
+fire_notification() {
+  # Args: <nas> <body>
+  # Fires a macOS user notification via osascript. Wrapped in `|| true` —
+  # a notification-system failure must NEVER break the sync. Truncates
+  # body to 150 chars (macOS NSUserNotification truncates around there
+  # anyway; we cap explicitly so the log shows what was actually sent).
+  local nas="$1" body="$2"
+  local title="Hither — ${nas}"
+
+  # Hard cap. Use awk for multibyte-safe truncation (the − minus sign is
+  # 3-byte UTF-8; naive ${var:0:150} could split mid-codepoint).
+  if (( ${#body} > 150 )); then
+    body="$(printf '%s' "${body}" | awk '{print substr($0, 1, 147) "..."}')"
+  fi
+
+  # Escape backslashes and double-quotes for the AppleScript string literal.
+  local esc_title esc_body
+  esc_title="${title//\\/\\\\}"; esc_title="${esc_title//\"/\\\"}"
+  esc_body="${body//\\/\\\\}";   esc_body="${esc_body//\"/\\\"}"
+
+  if [[ "${HITHER_NOTIFY_DRY_RUN}" == "1" ]]; then
+    log "  [notify dry-run] osascript -e 'display notification \"${esc_body}\" with title \"${esc_title}\"'"
+    return 0
+  fi
+
+  /usr/bin/osascript -e "display notification \"${esc_body}\" with title \"${esc_title}\"" 2>/dev/null || true
+  log "  notification fired: ${title} — ${body}"
+}
+
 apply_map_if_changed() {
   # Args: <nas-host>  (reads desired body on stdin)
   # Diffs against /etc/hither_<nas>; if changed (or if a needs-reload marker
   # is present from a prior failed automount), sudo-writes + reloads.
+  # When HITHER_NOTIFY=1 and the share-SET membership differs (not just
+  # ordering/whitespace), fires a macOS user notification after a
+  # successful write.
   local nas="$1"
   local map_path="/etc/hither_${nas}"
   local marker_path="/etc/hither_${nas}.needs-reload"
@@ -200,6 +305,26 @@ apply_map_if_changed() {
 
   local current_body=""
   [[ -f "${map_path}" ]] && current_body=$(< "${map_path}")
+
+  # --- v0.5: extract share-sets BEFORE applying the diff. -----------------
+  # We do this even when no notification will fire — the cost is two tiny
+  # awk passes and the code path is simpler than threading a conditional
+  # through the whole function.
+  #
+  # `is_initial`: no previous on-disk map means this is the first sync
+  # for this NAS. We don't fire notifications on initial sync — every
+  # share would show up as "added", which is noise rather than signal.
+  local is_initial=0
+  [[ -z "${current_body}" ]] && is_initial=1
+
+  local set_tmp_dir
+  set_tmp_dir=$(mktemp -d -t "hither-diff-${nas}.XXXXXX")
+  local current_set="${set_tmp_dir}/current" desired_set="${set_tmp_dir}/desired"
+  local added_set="${set_tmp_dir}/added"     removed_set="${set_tmp_dir}/removed"
+  printf '%s\n' "${current_body}" | extract_share_set_from_map > "${current_set}"
+  printf '%s\n' "${desired_body}" | extract_share_set_from_map > "${desired_set}"
+  comm -13 "${current_set}" "${desired_set}" > "${added_set}"   # in desired, not in current
+  comm -23 "${current_set}" "${desired_set}" > "${removed_set}" # in current, not in desired
 
   # Strip the "Generated:" line on both sides so timestamp churn doesn't
   # cause every run to count as a diff.
@@ -212,6 +337,7 @@ apply_map_if_changed() {
   # `automount -cv`. The wrapper clears the marker on success.
   if [[ ! -f "${marker_path}" && "${d_normalized}" == "${c_normalized}" ]]; then
     log "  no change for ${map_path} — skipping write"
+    rm -rf "${set_tmp_dir}"
     return 0
   fi
 
@@ -220,11 +346,31 @@ apply_map_if_changed() {
   else
     log "  diff detected for ${map_path} — applying via hither-write-map wrapper"
   fi
-  printf '%s\n' "${desired_body}" \
-    | sudo -n /usr/local/sbin/hither-write-map "${nas}" >/dev/null \
-    || { log "  hither-write-map failed (wrapper handles both tee + automount -cv atomically)"; return 1; }
+  if ! printf '%s\n' "${desired_body}" \
+    | sudo -n /usr/local/sbin/hither-write-map "${nas}" >/dev/null; then
+    log "  hither-write-map failed (wrapper handles both tee + automount -cv atomically)"
+    rm -rf "${set_tmp_dir}"
+    return 1
+  fi
 
   log "  ${map_path} updated; automount -cv invoked by wrapper"
+
+  # --- v0.5: fire notification if share-set membership changed. -----------
+  # Gate on (a) opted in via HITHER_NOTIFY, (b) not initial sync,
+  # (c) at least one share added or removed (not just file-body churn).
+  if [[ "${HITHER_NOTIFY}" == "1" && "${is_initial}" -eq 0 ]]; then
+    local summary
+    summary="$(compute_change_summary "${added_set}" "${removed_set}")"
+    if [[ -n "${summary}" ]]; then
+      fire_notification "${nas}" "${summary}"
+    else
+      log "  share-set unchanged (file body churned but membership stable) — no notification"
+    fi
+  elif [[ "${HITHER_NOTIFY}" == "1" && "${is_initial}" -eq 1 ]]; then
+    log "  initial sync for ${nas} — suppressing notification (every share would be 'added')"
+  fi
+
+  rm -rf "${set_tmp_dir}"
 }
 
 # ---------------------------------------------------------------------------

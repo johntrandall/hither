@@ -29,7 +29,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-HITHER_VERSION="0.4.1"
+HITHER_VERSION="0.5.0"
 VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
 export HITHER_VERSION
 
@@ -55,10 +55,15 @@ Usage:
   hither subscribe <nas> --user <dsm-user> [--proto http|https]
                                             [--schedule-hour H]
                                             [--schedule-minute M]
+                                            [--notify=true|false]
       Add a NAS subscription. Prompts for the DSM password (or reads it
       from stdin if piped), stores it in macOS Keychain, writes the
       subscription file to ~/.config/hither/subscriptions/<nas>.toml,
       and triggers an initial sync.
+
+      --notify=true (default) fires a macOS user notification on
+      subsequent syncs when the set of shares this user can see on the
+      NAS changes (shares added or removed).
 
   hither unsubscribe <nas> [--purge]
       Remove a NAS subscription. Unmounts any shares, deletes the
@@ -69,9 +74,11 @@ Usage:
       Tabular view of subscriptions: NAS / user / proto / schedule /
       share count / last sync age.
 
-  hither sync [<nas>]
+  hither sync [<nas>] [--notify|--no-notify]
       Fire the sync now. Without args: every subscription. With <nas>:
-      that one only.
+      that one only. --notify / --no-notify override the per-subscription
+      notify_on_changes setting for this one invocation; default is to
+      read the first subscription's notify_on_changes.
 
   hither status
       One-screen status: both daemons' load state, file state,
@@ -276,9 +283,13 @@ cmd_subscribe() {
     die "'hither subscribe' must NOT be run as root — Keychain write needs user session"
   fi
 
-  local nas="" user="" proto="http" hour="4" minute="23"
+  # v0.5: notify defaults to "true" — new subscriptions opt in by default.
+  # Existing pre-v0.5 subscription files that lack the field stay at
+  # default-false at read time (see hither_sub_read_notify), so this only
+  # affects new installs.
+  local nas="" user="" proto="http" hour="4" minute="23" notify="true"
   if [[ $# -lt 1 ]]; then
-    die "usage: hither subscribe <nas> --user <dsm-user> [--proto http|https] [--schedule-hour H] [--schedule-minute M]"
+    die "usage: hither subscribe <nas> --user <dsm-user> [--proto http|https] [--schedule-hour H] [--schedule-minute M] [--notify=true|false]"
   fi
   # Guard against `hither subscribe --user foo`: $1 here would be `--user`,
   # which would silently become the nas name. Require a positional nas first.
@@ -292,6 +303,10 @@ cmd_subscribe() {
       --proto)           proto="$2"; shift 2 ;;
       --schedule-hour)   hour="$2"; shift 2 ;;
       --schedule-minute) minute="$2"; shift 2 ;;
+      --notify=true)     notify="true"; shift ;;
+      --notify=false)    notify="false"; shift ;;
+      --notify)          notify="true"; shift ;;
+      --no-notify)       notify="false"; shift ;;
       *) die "unknown arg to subscribe: $1" ;;
     esac
   done
@@ -334,8 +349,8 @@ cmd_subscribe() {
   echo "[ok] Keychain entry stored for ${user}@${nas}"
 
   # Write subscription file.
-  hither_sub_write "${nas}" "${user}" "${proto}" "${hour}" "${minute}"
-  echo "[ok] wrote $(hither_sub_path "${nas}")"
+  hither_sub_write "${nas}" "${user}" "${proto}" "${hour}" "${minute}" "${notify}"
+  echo "[ok] wrote $(hither_sub_path "${nas}") (notify_on_changes=${notify})"
 
   # Apply auto_master entry. Requires sudo. We attempt sudo -n first; if
   # that fails, document the next step and don't block.
@@ -354,10 +369,14 @@ cmd_subscribe() {
   # Refresh LaunchAgent env block to include the new NAS.
   hither_refresh_launchagent_env || echo "[warn] LaunchAgent refresh failed; sync will use stale NAS_LIST until next 'hither bootstrap --user-only'"
 
-  # Trigger initial sync (just this NAS).
+  # Trigger initial sync (just this NAS). HITHER_NOTIFY=0 unconditionally
+  # here — the initial-sync gate in hither-sync.sh also suppresses
+  # notifications when there's no prior on-disk map, but we belt-and-
+  # suspenders it at the CLI layer so the very first run on a brand-new
+  # subscription never fires a notification.
   echo "[run] initial sync for ${nas}"
   if [[ -x /usr/local/libexec/hither/hither-sync.sh ]]; then
-    TARGET_USER="${user}" NAS_LIST="${nas}" NAS_PROTO="${proto}" \
+    TARGET_USER="${user}" NAS_LIST="${nas}" NAS_PROTO="${proto}" HITHER_NOTIFY="0" \
       /usr/local/libexec/hither/hither-sync.sh \
       || echo "[warn] initial sync exited non-zero — check ~/Library/Logs/hither/sync.log"
   else
@@ -508,7 +527,27 @@ cmd_sync() {
     die "'hither sync' must NOT be run as root — Keychain access requires user GUI session"
   fi
 
-  local target_nas="${1:-}"
+  # Parse flags. The target_nas is the first non-flag positional arg
+  # (legacy: `hither sync [<nas>]`). v0.5 adds --notify / --no-notify
+  # for one-shot override of the subscription's notify_on_changes.
+  local target_nas="" notify_override=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --notify)    notify_override="1"; shift ;;
+      --no-notify) notify_override="0"; shift ;;
+      --notify=true)  notify_override="1"; shift ;;
+      --notify=false) notify_override="0"; shift ;;
+      --*) die "unknown flag to sync: $1" ;;
+      *)
+        if [[ -z "${target_nas}" ]]; then
+          target_nas="$1"; shift
+        else
+          die "unexpected positional arg to sync: $1"
+        fi
+        ;;
+    esac
+  done
+
   local subs
   subs="$(hither_sub_list_names)"
 
@@ -531,26 +570,50 @@ cmd_sync() {
       || die "nas name '${target_nas}' invalid"
     hither_sub_exists "${target_nas}" \
       || die "no subscription for ${target_nas} — run: hither subscribe ${target_nas} --user <dsm-user>"
-    local path user proto
+    local path user proto sub_notify hn
     path="$(hither_sub_path "${target_nas}")"
     user="$(hither_sub_read_field "${path}" user)"
     proto="$(hither_sub_read_field "${path}" nas_proto)"
-    TARGET_USER="${user}" NAS_LIST="${target_nas}" NAS_PROTO="${proto}" \
+    sub_notify="$(hither_sub_read_notify "${path}")"
+    if [[ -n "${notify_override}" ]]; then
+      hn="${notify_override}"
+    elif [[ "${sub_notify}" == "true" ]]; then
+      hn="1"
+    else
+      hn="0"
+    fi
+    TARGET_USER="${user}" NAS_LIST="${target_nas}" NAS_PROTO="${proto}" HITHER_NOTIFY="${hn}" \
       exec /usr/local/libexec/hither/hither-sync.sh
   fi
 
   # All subscriptions. Iterate (assume single TARGET_USER + proto; warned
-  # in refresh_launchagent_env for multi-user).
-  local first_user="" first_proto="" nas_list="" iter_nas iter_user iter_proto
+  # in refresh_launchagent_env for multi-user). HITHER_NOTIFY defaults to
+  # the FIRST subscription's notify_on_changes (matches the single-LaunchAgent
+  # behavior). --notify / --no-notify override.
+  local first_user="" first_proto="" first_notify="false"
+  local nas_list="" iter_nas iter_user iter_proto seen_first=0
   while IFS=$'\t' read -r iter_nas iter_user iter_proto _ _; do
     [[ -n "$iter_nas" ]] || continue
-    [[ -z "$first_user" ]]  && first_user="$iter_user"
-    [[ -z "$first_proto" ]] && first_proto="$iter_proto"
+    if (( seen_first == 0 )); then
+      first_user="$iter_user"
+      first_proto="$iter_proto"
+      first_notify="$(hither_sub_read_notify "$(hither_sub_path "$iter_nas")")"
+      seen_first=1
+    fi
     if [[ -z "$nas_list" ]]; then nas_list="$iter_nas"
     else nas_list="${nas_list} ${iter_nas}"; fi
   done < <(hither_sub_iter)
 
-  TARGET_USER="${first_user}" NAS_LIST="${nas_list}" NAS_PROTO="${first_proto}" \
+  local hn
+  if [[ -n "${notify_override}" ]]; then
+    hn="${notify_override}"
+  elif [[ "${first_notify}" == "true" ]]; then
+    hn="1"
+  else
+    hn="0"
+  fi
+
+  TARGET_USER="${first_user}" NAS_LIST="${nas_list}" NAS_PROTO="${first_proto}" HITHER_NOTIFY="${hn}" \
     exec /usr/local/libexec/hither/hither-sync.sh
 }
 

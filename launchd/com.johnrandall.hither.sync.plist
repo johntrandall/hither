@@ -60,6 +60,18 @@ References: github.com/johntrandall/hither; docs/architecture.md; docs/design-de
         <string>PLACEHOLDER_NAS</string>
         <key>NAS_PROTO</key>
         <string>http</string>
+        <!--
+            HITHER_NOTIFY: "1" or "0". When "1" AND a sync run detects
+            that the share-set changed (added or removed shares vs the
+            previous on-disk map), hither-sync.sh fires a macOS user
+            notification via `osascript -e 'display notification ...'`.
+            Set to "1" if ANY subscription has notify_on_changes=true in
+            its TOML; refreshed by hither_refresh_launchagent_env on
+            every subscribe/unsubscribe. Default "0" (silent) on a
+            template-only plist.
+        -->
+        <key>HITHER_NOTIFY</key>
+        <string>0</string>
     </dict>
 
     <!--

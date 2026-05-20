@@ -16,7 +16,7 @@ _hither() {
       COMPREPLY=( $(compgen -W "--reapply-only --user-only --root-only" -- "${cur}") )
       ;;
     subscribe)
-      COMPREPLY=( $(compgen -W "--user --proto --schedule-hour --schedule-minute" -- "${cur}") )
+      COMPREPLY=( $(compgen -W "--user --proto --schedule-hour --schedule-minute --notify --no-notify --notify=true --notify=false" -- "${cur}") )
       ;;
     unsubscribe|uninstall)
       COMPREPLY=( $(compgen -W "--purge" -- "${cur}") )
@@ -33,6 +33,8 @@ _hither() {
         local extra=""
         [[ "${COMP_WORDS[1]}" != "sync" ]] && extra="all"
         COMPREPLY=( $(compgen -W "${subs} ${extra}" -- "${cur}") )
+      elif [[ "${COMP_WORDS[1]}" == "sync" ]]; then
+        COMPREPLY=( $(compgen -W "--notify --no-notify" -- "${cur}") )
       fi
       ;;
   esac

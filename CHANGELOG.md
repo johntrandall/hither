@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.5.0] — 2026-05-20
+
+Surface share-set changes as macOS notifications. Until now, the only way to find out that a NAS-side admin added or removed a share you can see was to hit `cd /Hither/<nas>/<share>` and get a "No such file" — or to manually `hither list` and notice the count drifting. v0.5 closes that gap with proactive notifications fired through `osascript`.
+
+### Added
+- **`notify_on_changes` field in `subscription.toml`.** New subscriptions default to `true`. Existing v0.4.x subscriptions that lack the field stay at default-`false` at read time, so this is opt-in for upgrades and opt-out for fresh installs.
+- **`hither subscribe --notify=true|false` / `--notify` / `--no-notify`** CLI flag. Sets the field on subscription create.
+- **`hither sync --notify` / `--no-notify`** CLI flag. One-shot override for a manual sync invocation; defaults to the first subscription's `notify_on_changes`.
+- **`HITHER_NOTIFY` env var** wired into the LaunchAgent plist. Set to `1` iff ANY subscription has `notify_on_changes = true`. Refreshed on every `subscribe`/`unsubscribe` via `hither_refresh_launchagent_env`.
+- **Share-set diff in `apply_map_if_changed`** in `libexec/hither-sync.sh`. Extracts share names from the on-disk map and the desired map, computes `added = desired - current` and `removed = current - desired` via `comm -13` / `comm -23`. When the membership differs (NOT just timestamp / whitespace churn), fires `osascript -e 'display notification "<summary>" with title "Hither — <nas>"'`. Wrapped in `|| true` — notification failure can never break the sync. Summary string is "+ Photos, Videos" / "− OldShare" / "+ Photos / − OldShare" for small diffs, "+ 5 new, − 2 removed" for larger ones. Capped at ~150 chars (multibyte-safe truncation via awk so the UTF-8 "−" minus sign doesn't get split).
+
+### Skipped (intentional non-trigger paths)
+- **Initial sync.** When there's no previous on-disk map, every share would show up as "added" — that's noise, not signal. The notification path is gated by an `is_initial` check.
+- **No-op syncs.** When the share-set membership is identical to the on-disk map (even if the file body churned for some other reason), no notification fires. Logged as "share-set unchanged" in the sync log.
+- **Opted-out subscriptions.** `HITHER_NOTIFY=0` → no `osascript` call.
+
+### Design notes
+- **Global, not per-subscription.** All subscriptions on one Mac share a single LaunchAgent; per-NAS notify-gating would require per-NAS env injection we don't have. Global toggle is fine for v0.5; per-NAS gate is a post-v1.0 nice-to-have. The TOML field is per-subscription (forward-compat for that future split) but the runtime gate is the global `HITHER_NOTIFY` env var.
+- **No external dependency.** `osascript` ships with every macOS. No Homebrew `terminal-notifier` install. The notification appears in Notification Center under "Script Editor" (Apple's quirk — `display notification` is attributed to the AppleScript host).
+- **Notification permission.** macOS may prompt for notification permission for "Script Editor" the first time. After that, notifications appear silently.
+
+### Files changed
+- `bin/hither` — version bump 0.4.1 → 0.5.0; `--notify` flag on `subscribe`; `--notify`/`--no-notify` flags on `sync`; HITHER_NOTIFY threaded to `hither-sync.sh` invocation
+- `libexec/hither-lib.sh` — `notify_on_changes` field in `hither_sub_write`; `hither_sub_read_notify` helper; `HITHER_NOTIFY` env var in `hither_refresh_launchagent_env`
+- `libexec/hither-sync.sh` — `extract_share_set_from_map`, `compute_change_summary`, `fire_notification` helpers; share-set diff in `apply_map_if_changed`
+- `launchd/com.johnrandall.hither.sync.plist` — `HITHER_NOTIFY` key in `EnvironmentVariables`, default `0`
+- `completions/hither.bash` — added `--notify` / `--no-notify` to `subscribe` and `sync`
+- `Formula/hither.rb` — version 0.4.1 → 0.5.0
+- `README.md`, `docs/architecture.md` — documented the notification path
+- `tests/test-notify-diff.sh` — isolated diff/summary unit tests
+
+### Version
+- `bin/hither` `HITHER_VERSION` → `0.5.0`
+- `Formula/hither.rb` `version` → `0.5.0`
+
 ## [0.4.1] — 2026-05-20
 
 Iterative-verification fixes from the parallel verifier pass on v0.4.0. All bugs were caught BEFORE publication.

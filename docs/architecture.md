@@ -38,6 +38,7 @@ The first two are structural. The third is data, regenerated daily.
 4. The script renders the share list as an autofs indirect-map body.
 5. It diffs against the on-disk `/etc/hither_{nas}`. If unchanged: no-op. If changed: pipes the body into `sudo -n /usr/local/sbin/hither-write-map {host}`.
 6. The wrapper validates the hostname argument against `^[a-z0-9-]+$`, atomically writes `/etc/hither_{host}`, and runs `automount -cv` to pick up the change.
+7. **(v0.5)** If `HITHER_NOTIFY=1` AND this is not the initial sync for this NAS AND the share-SET membership (not just file-body content) differs between the on-disk map and the new map, `hither-sync.sh` fires a macOS user notification via `osascript -e 'display notification "<summary>" with title "Hither — <nas>"'`. The summary is "+ Added / − Removed" for small diffs (≤3 total changes) or "+ N new, − M removed" for larger ones. Notification failures are swallowed (`|| true`) — a missing osascript binary, denied notification permission, or any other Notification-Center issue must NEVER break the sync.
 
 The whole flow happens on one Mac. No orchestrator, no external secret store, no sync server.
 
@@ -112,17 +113,18 @@ user = "me"
 nas_proto = "http"
 schedule_hour = 4
 schedule_minute = 23
+notify_on_changes = true   # v0.5+; default true for new subscriptions, default false for upgraded v0.4.x files
 
 [meta]
 added = "2026-05-20T07:30:00Z"
-hither_version = "0.4.0"
+hither_version = "0.5.0"
 ```
 
 This is the **single source of truth** for which NASes this Mac syncs. Adding/removing a subscription is `hither subscribe` / `hither unsubscribe`. Three things change in sync:
 
 1. The TOML file at `~/.config/hither/subscriptions/<nas>.toml` (created/deleted).
 2. The DSM password in macOS Keychain (`security add-internet-password` / `delete-internet-password`).
-3. The LaunchAgent's `EnvironmentVariables` block (re-rendered from the current subscription set, then `launchctl bootout` + `bootstrap` to reload).
+3. The LaunchAgent's `EnvironmentVariables` block (re-rendered from the current subscription set, then `launchctl bootout` + `bootstrap` to reload). v0.5 adds a `HITHER_NOTIFY` env var to that block, set to `"1"` iff ANY subscription has `notify_on_changes = true` (global toggle — all subscriptions share one LaunchAgent).
 
 The LaunchAgent's plist on disk holds materialized values for `NAS_LIST` and `TARGET_USER`. The template in the repo (`launchd/com.johnrandall.hither.sync.plist`) holds placeholder values that are overwritten on every `subscribe` / `unsubscribe`. The reason for materializing into the plist instead of reading the TOML at fire time: launchd doesn't run the agent in a shell, so the agent needs its env populated declaratively in the plist.
 

@@ -66,9 +66,17 @@ hither_sub_read_field() {
 }
 
 hither_sub_write() {
-  # Args: <nas> <user> <proto> <hour> <minute>
+  # Args: <nas> <user> <proto> <hour> <minute> [notify_on_changes]
   # Writes the subscription TOML atomically.
+  #
+  # notify_on_changes is the optional 6th arg, "true" or "false". Defaults
+  # to "true" — new subscriptions opt into change notifications by default
+  # because that's the better UX (find out about added/removed shares
+  # proactively, not via a "/Hither/<nas>/<share>: No such file" failure
+  # several syncs later). Existing v0.4.x subscriptions that lack the
+  # field stay at default-false at read time (see hither_sub_read_notify).
   local nas="$1" user="$2" proto="$3" hour="$4" minute="$5"
+  local notify="${6:-true}"
   local dest tmp
   dest="$(hither_sub_path "$nas")"
   tmp="${dest}.tmp.$$"
@@ -83,6 +91,7 @@ user = "${user}"
 nas_proto = "${proto}"
 schedule_hour = ${hour}
 schedule_minute = ${minute}
+notify_on_changes = ${notify}
 
 [meta]
 added = "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -90,6 +99,24 @@ hither_version = "${HITHER_VERSION:-unknown}"
 TOML
   chmod 0600 "${tmp}"
   mv -f "${tmp}" "${dest}"
+}
+
+hither_sub_read_notify() {
+  # Args: <subscription-file>
+  # Returns "true" or "false" on stdout. Default: "false" when the field
+  # is absent (preserves v0.4.x behavior — no surprise notifications on
+  # upgrade for users who didn't opt in).
+  local file="$1" val
+  val="$(hither_sub_read_field "$file" notify_on_changes)"
+  case "$val" in
+    true|True|TRUE|1|yes|on)   printf 'true\n' ;;
+    false|False|FALSE|0|no|off|"") printf 'false\n' ;;
+    *)
+      # Unknown value — log to stderr and default to false (safer).
+      echo "[warn] ${file}: unrecognized notify_on_changes='${val}', defaulting to false" >&2
+      printf 'false\n'
+      ;;
+  esac
 }
 
 hither_sub_delete() {
@@ -151,7 +178,13 @@ hither_refresh_launchagent_env() {
   # single TARGET_USER per Mac (DSM identity). If multiple subscriptions
   # disagree on `user`, we pick the first and warn — multi-user support
   # is post-v1.0 (see roadmap "Out-of-scope").
-  local first_user="" nas_list="" iter_user iter_nas
+  #
+  # HITHER_NOTIFY: global toggle for v0.5 — set to "1" iff ANY subscription
+  # has notify_on_changes = true. All subscriptions share one LaunchAgent,
+  # so a per-subscription notify gate would require per-NAS env injection
+  # we don't have today. Global is fine for v0.5; per-NAS notify is a
+  # post-v1.0 nice-to-have.
+  local first_user="" nas_list="" iter_user iter_nas notify_any="0"
   while IFS=$'\t' read -r iter_nas iter_user _ _ _; do
     [[ -n "$iter_nas" ]] || continue
     if [[ -z "$first_user" ]]; then
@@ -164,6 +197,9 @@ hither_refresh_launchagent_env() {
     else
       nas_list="${nas_list} ${iter_nas}"
     fi
+    if [[ "$(hither_sub_read_notify "$(hither_sub_path "$iter_nas")")" == "true" ]]; then
+      notify_any="1"
+    fi
   done < <(hither_sub_iter)
 
   if [[ -z "$nas_list" ]]; then
@@ -171,14 +207,13 @@ hither_refresh_launchagent_env() {
     return 0
   fi
 
-  # Re-render. Substitute __HOME__, then patch NAS_LIST/TARGET_USER via
-  # sed against the EnvironmentVariables block. We're replacing the
-  # values that follow the literal <key>TARGET_USER</key> and
-  # <key>NAS_LIST</key> lines.
+  # Re-render. Substitute __HOME__, then patch NAS_LIST/TARGET_USER/
+  # HITHER_NOTIFY via awk against the EnvironmentVariables block. We're
+  # replacing the values that follow the literal <key>TARGET_USER</key>,
+  # <key>NAS_LIST</key>, and <key>HITHER_NOTIFY</key> lines.
   local tmp="${HITHER_AGENT_PATH}.tmp.$$"
   sed "s|__HOME__|${HOME}|g" "${src}" > "${tmp}"
-  # Replace TARGET_USER value (line immediately after its <key>).
-  /usr/bin/awk -v u="${first_user}" -v l="${nas_list}" '
+  /usr/bin/awk -v u="${first_user}" -v l="${nas_list}" -v n="${notify_any}" '
     BEGIN { mode = "" }
     {
       if (mode == "user") {
@@ -187,10 +222,14 @@ hither_refresh_launchagent_env() {
       } else if (mode == "list") {
         sub(/<string>[^<]*<\/string>/, "<string>" l "</string>")
         mode = ""
+      } else if (mode == "notify") {
+        sub(/<string>[^<]*<\/string>/, "<string>" n "</string>")
+        mode = ""
       }
       print
       if ($0 ~ /<key>TARGET_USER<\/key>/) mode = "user"
       else if ($0 ~ /<key>NAS_LIST<\/key>/) mode = "list"
+      else if ($0 ~ /<key>HITHER_NOTIFY<\/key>/) mode = "notify"
     }
   ' "${tmp}" > "${tmp}.2"
   mv -f "${tmp}.2" "${tmp}"
@@ -208,7 +247,7 @@ hither_refresh_launchagent_env() {
   local domain="gui/$(id -u)"
   launchctl bootout "${domain}/${HITHER_AGENT_LABEL}" 2>/dev/null || true
   if launchctl bootstrap "${domain}" "${HITHER_AGENT_PATH}"; then
-    echo "[ok] LaunchAgent reloaded with NAS_LIST='${nas_list}' TARGET_USER='${first_user}'"
+    echo "[ok] LaunchAgent reloaded with NAS_LIST='${nas_list}' TARGET_USER='${first_user}' HITHER_NOTIFY=${notify_any}"
   else
     echo "ERROR: launchctl bootstrap ${domain} failed after refresh" >&2
     return 1

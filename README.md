@@ -83,10 +83,12 @@ hither subscribe <nas> --user <dsm-user>
 ```
 hither bootstrap [--reapply-only|--user-only|--root-only]
                                           Install / re-apply Hither system state
-hither subscribe <nas> --user <dsm-user>  Add a NAS, store password in Keychain
+hither subscribe <nas> --user <dsm-user> [--notify=true|false]
+                                          Add a NAS, store password in Keychain
 hither unsubscribe <nas> [--purge]        Remove a NAS subscription
 hither list                               Show subscribed NASes + last-sync age
-hither sync [<nas>]                       Manual fire of the daily sync
+hither sync [<nas>] [--notify|--no-notify]
+                                          Manual fire of the daily sync
 hither status                             Daemon + config + mount state
 hither unmount <nas> | <nas>/<share> | all   Force-unmount with umount -f
 hither remount <nas> | all                Unmount + automount -cv
@@ -131,6 +133,8 @@ Two daemons on each Mac, with non-overlapping responsibilities:
 | `com.johnrandall.hither.sync` | LaunchAgent | user GUI | Daily DSM API call → render map → write via `hither-write-map` | yes |
 
 The LaunchAgent runs in user GUI context (required for Keychain access). It calls the DSM Web API **as the target user**, which means the server-side ACL filter returns exactly the shares that user can read. The script renders an autofs indirect-map body and pipes it through a root-owned wrapper script that atomically writes `/etc/hither_<nas>` and runs `automount -cv`.
+
+When the share-set changes between syncs — the NAS admin adds a share you can now read, or revokes one you used to see — Hither surfaces that as a macOS user notification ("Hither — *nas*: + Photos / − OldShare"). New subscriptions opt into this by default; turn it off per-subscription with `hither subscribe <nas> --user <u> --notify=false`, or for a single manual sync with `hither sync --no-notify`.
 
 The LaunchDaemon never touches the network and never `stat`s anything under `/Hither/`. Its only job is to keep `/etc/synthetic.conf` and `/etc/auto_master` from drifting.
 
