@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.5.5] — 2026-05-20
+
+Fully automated SMB mounts via URL-encoded credentials embedded in the autofs map. Discovered in live SusanBones testing under v0.5.4: `mount_smbfs //user@host/share` — which `automountd` invokes internally on every mount trigger — cannot reliably find or use a Keychain entry created by `security add-internet-password`, even with the GUI `-A` permissive ACL. NetFS, AppleScript, and Finder Cmd-K all accept the same Keychain entry; only `mount_smbfs` rejects with "server rejected the connection: Authentication error" while the byte-for-byte password match is correct. Forcing users to Cmd-K once after `hither subscribe` defeats the fully-automated goal that v0.2–v0.5 worked toward.
+
+### Changed
+- **`libexec/hither-sync.sh::render_map`** now URL-encodes the DSM password and embeds it into each map line between the user and the `@` separator: `://<user>:<URL_ENCODED_PW>@<host>/<share>`. A pure-zsh `url_encode` helper (RFC 3986 unreserved-set, byte-level %HH for non-ASCII) avoids any new dependency. The password is threaded from `dsm_login` (which now sets a script-scope `HITHER_LAST_DSM_PASSWORD`) into the main loop's `render_map` invocation, then scrubbed after each NAS iteration.
+- **`sbin/hither-write-map`** writes the map file with `umask 077` + `chmod 600` so the file is mode 0600 (was 0644). The map now contains URL-encoded cleartext SMB credentials; world-readable was no longer acceptable. `automountd` runs as root and reads the file directly — the tighter mode does not affect mount-trigger function.
+
+### Why this is acceptable on-disk
+Anyone with root on the Mac (or `sudo`) can already extract the same DSM password from Keychain via `security find-internet-password -w` — so the on-disk form does NOT widen the attack surface. The mode 0600 protects against non-root local users on a multi-user Mac. Time Machine excludes `/private/etc/` by default, so casual TM snapshots don't capture the credential. Full threat-model writeup in `docs/design-decisions.md` ("Why `/etc/hither_<nas>` contains URL-encoded passwords on disk").
+
+### Added
+- **`tests/test-notify-diff.sh`** — `url_encode` unit tests covering ASCII alphanumerics, RFC 3986 unreserved punctuation, ASCII reserved/punctuation characters (`#`, `"`, `{`, `}`, `@`, space), and UTF-8 byte sequences. Eight cases.
+
+### Documentation
+- New `docs/design-decisions.md` section: "Why `/etc/hither_<nas>` contains URL-encoded passwords on disk" — full rationale and threat model.
+- README "How it works" updated to note the URL-encoded credential and link to the design-decisions section.
+
+### Verified live
+SusanBones at this release: `hither sync umbridge` regenerates `/etc/hither_umbridge` with URL-encoded credentials at mode 0600, and `ls /System/Volumes/Data/Hither/umbridge/Umb-safety` now succeeds. Pre-v0.5.5 the same `ls` returned "Operation not permitted" because every mount attempt failed `mount_smbfs` authentication, leaving autofs unable to materialize the directory.
+
+### Version
+- `bin/hither` `HITHER_VERSION` → `0.5.5`
+- `Formula/hither.rb` `version` → `0.5.5`
+
 ## [0.5.4] — 2026-05-20
 
 Iterative-verification round-4 fixes. v0.5.3's adversarial-round closures were all verified landed. Round 4 itself surfaced 1 bug + 2 important items + 4 nits; this release lands the bug + 2 importants and explicitly accepts the 4 nits with notes.

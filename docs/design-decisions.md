@@ -116,6 +116,33 @@ MYNAS_DSM_PASSWORD=$(op read 'op://Personal/mynas/password') hither sync
 
 The env-var path is the universal-interface escape hatch. Routine sync (LaunchAgent fire) goes Keychain-only.
 
+## Why `/etc/hither_<nas>` contains URL-encoded passwords on disk
+
+**v0.5.5 change.** Map files are now written mode 0600 with the DSM password URL-encoded into each map line:
+
+```
+Umb-safety  -fstype=smbfs,soft ://johntrandall:URL_ENCODED_PW@umbridge/Umb-safety
+```
+
+…in place of the v0.5.4-and-earlier form:
+
+```
+Umb-safety  -fstype=smbfs,soft ://johntrandall@umbridge/Umb-safety
+```
+
+macOS's `mount_smbfs` cannot reliably authenticate via Keychain entries created by the `security` CLI; only Finder's Cmd-K creates entries with the right ACL+attribute hookup. Verifying this took the v0.5 testing session: NetFS / AppleScript / Finder all work with our CLI-created Keychain entry, but `mount_smbfs` (which `automountd` invokes internally) rejects them with "Authentication error" even though the byte-for-byte password match is correct. Even adding the GUI `-A` permissive ACL did not resolve it on macOS 15.7.7.
+
+Forcing users to Cmd-K once after `hither subscribe` defeats the "fully automated, self-contained per-Mac tool" goal that motivated v0.2 → v0.5. So Hither writes URL-encoded credentials directly into `/etc/hither_<nas>` and tightens the file to mode 0600 (root read+write only).
+
+Threat model:
+
+- Anyone with root on the Mac (or `sudo` access) can read `/etc/hither_<nas>` and recover the DSM password. That's the same threat boundary as `security find-internet-password -s <nas> -a <user> -w` for the same admin user — they could already extract the password from Keychain. So the on-disk form does NOT widen the attack surface.
+- The mode 0600 prevents non-root local users from reading. A multi-user Mac with non-admin user accounts is protected as long as root isn't compromised.
+- The credential is on the same filesystem as the rest of `/etc/`; standard Mac backup includes (or excludes) it as a whole. Time Machine excludes `/etc/` by default (it's under `/private/etc`, which is on the system volume side of the FileVault/SSV split that TM skips), so a casual TM backup snapshot will not include the credential. Hand-rolled backups of `/` would.
+- `automountd` runs as root and reads `/etc/hither_<host>` directly — the 0600 mode does not affect mount-trigger function. Users `cd /Hither/<nas>/<share>` and autofs mediates the lookup; users do not read the map file themselves.
+
+The cleartext-on-disk trade-off is documented in the same commit that introduced it (v0.5.5) so future contributors don't accidentally weaken it back to mode 0644 — and so the threat model is explicit rather than implicit.
+
 ## Why a `.needs-reload` marker file on automount failure
 
 The v0.1.0 wrapper had a subtle stuck-state bug. The sync script's diff comparison (`current_body == desired_body`) is between the on-disk map and the desired map. If `mv -f tmp target` succeeded but `automount -cv` failed afterward, the on-disk file matched the desired content — so the *next* sync run saw `current == desired` and skipped re-invocation entirely. The autofs cache stayed stale until the Mac rebooted.

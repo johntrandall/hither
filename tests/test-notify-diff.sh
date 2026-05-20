@@ -43,6 +43,8 @@ eval "$(extract_function "${SYNC_SH}" compute_change_summary)"
 command -v compute_change_summary >/dev/null || { echo "FATAL: extract_function failed to find compute_change_summary in ${SYNC_SH}"; exit 1; }
 eval "$(extract_function "${SYNC_SH}" fire_notification)"
 command -v fire_notification >/dev/null || { echo "FATAL: extract_function failed to find fire_notification in ${SYNC_SH}"; exit 1; }
+eval "$(extract_function "${SYNC_SH}" url_encode)"
+command -v url_encode >/dev/null || { echo "FATAL: extract_function failed to find url_encode in ${SYNC_SH}"; exit 1; }
 
 # Stub `log` so fire_notification can record its dry-run output without
 # requiring the rest of hither-sync.sh's logging setup.
@@ -247,6 +249,47 @@ case "${NOTIFY_LOG_CAPTURE}" in
   *)                       title_ok=0 ;;
 esac
 report "fire_notification renders title correctly" "1" "${title_ok}"
+
+# ---------------------------------------------------------------------------
+# Test 6: url_encode (v0.5.5) — RFC 3986 unreserved-set passthrough,
+# everything else %HH-encoded by byte value. The output of this function
+# is embedded into /etc/hither_<nas> map lines as
+# ://<user>:<URL_ENCODED_PW>@<host>/<share>; mount_smbfs's URL parser
+# expects standard percent-encoding for the userinfo component.
+# ---------------------------------------------------------------------------
+echo "== url_encode =="
+
+# RFC 3986 unreserved: A-Z a-z 0-9 - . _ ~ — all pass through unchanged.
+report "ASCII alphanumerics pass through" \
+  "AbCdEf012789" "$(url_encode 'AbCdEf012789')"
+
+report "unreserved punctuation (- . _ ~) passes through" \
+  "a-b.c_d~e" "$(url_encode 'a-b.c_d~e')"
+
+# Common SMB-credential metacharacters that MUST be encoded so they don't
+# break the //user:pw@host URL grammar.
+report "'#' encodes to %23" \
+  "abc%23def" "$(url_encode 'abc#def')"
+
+report "'\"' encodes to %22" \
+  "%22hello%22" "$(url_encode '"hello"')"
+
+report "'{' and '}' encode to %7B and %7D" \
+  "%7Babc%7D" "$(url_encode '{abc}')"
+
+# '@' is the userinfo/host separator — encoding it is load-bearing for
+# passwords that happen to contain literal '@'.
+report "'@' encodes to %40" \
+  "user%40domain" "$(url_encode 'user@domain')"
+
+# Space → %20 (NOT '+'; '+' is form-encoding, not URI-encoding).
+report "space encodes to %20" \
+  "p%20w" "$(url_encode 'p w')"
+
+# UTF-8 byte sequences. ALL non-ASCII bytes should be encoded byte-by-byte
+# in their UTF-8 representation. "é" is U+00E9 → 0xC3 0xA9 → %C3%A9.
+report "UTF-8 'é' encodes to %C3%A9" \
+  "%C3%A9" "$(url_encode 'é')"
 
 # ---------------------------------------------------------------------------
 # Summary

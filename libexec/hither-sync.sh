@@ -84,6 +84,43 @@ log() {
 
 die() { log "FATAL: $*"; exit 1; }
 
+# ---------------------------------------------------------------------------
+# URL-encoding (v0.5.5)
+# ---------------------------------------------------------------------------
+#
+# Percent-encode a string per RFC 3986 unreserved-set rules. Pure zsh; no
+# external deps (curl/python/jq not available at sourcing-time in test
+# extraction contexts).
+#
+# Unreserved per RFC 3986: A-Z a-z 0-9 - . _ ~
+# Everything else gets %HH-encoded by the BYTE value. This is what
+# mount_smbfs's URL parser expects between the user and the `@` separator
+# in `//user:URL_ENCODED_PW@host/share`.
+#
+# zsh-specific notes:
+#   - ${#s} counts bytes when MULTIBYTE is unset; counts codepoints when set.
+#     Either is fine for our purpose — the case statement matches one
+#     ${s[i]} unit per iteration, and we %HH-encode the byte value via
+#     printf '%%%02X' "'$c" (the leading apostrophe makes printf treat the
+#     arg as a character literal and emit its numeric value).
+#   - For a multi-byte codepoint under MULTIBYTE, $c is the full codepoint
+#     and "'$c" returns the codepoint number, NOT the UTF-8 byte sequence.
+#     Toggling MULTIBYTE off for the loop ensures we emit byte-level %HH
+#     for non-ASCII, which is what RFC 3986 mandates for "binary octets".
+url_encode() {
+  emulate -L zsh
+  unsetopt MULTIBYTE 2>/dev/null || true
+  local s="$1" out="" i c
+  for (( i=1; i<=${#s}; i++ )); do
+    c="${s[i]}"
+    case "$c" in
+      [A-Za-z0-9_.~-]) out+="$c" ;;
+      *) out+=$(printf '%%%02X' "'$c") ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # Required external tools.
 for cmd in curl jq sudo security; do
   command -v "$cmd" >/dev/null || die "missing required tool: $cmd"
@@ -149,6 +186,11 @@ dsm_login() {
   # Credential resolution order:
   #   1. ${<NAS_UPPER>_DSM_PASSWORD}   ← env-var override (manual / scripted)
   #   2. macOS Keychain (security find-internet-password)  ← LaunchAgent path
+  #
+  # v0.5.5: on success, also writes the resolved cleartext password to the
+  # script-scope variable HITHER_LAST_DSM_PASSWORD so the main loop can
+  # thread it into render_map for URL-encoded embedding in the map file.
+  # NOT exported — process-internal only. Cleared on failure paths.
   local nas="$1"
   local password=""
   local nas_upper
@@ -184,8 +226,10 @@ dsm_login() {
 
   local ok sid
   ok=$(echo "${resp}" | jq -r '.success // false')
-  [[ "${ok}" == "true" ]] || { log "  DSM auth failed: $(echo "$resp" | jq -c '.error // empty')"; return 1; }
+  [[ "${ok}" == "true" ]] || { HITHER_LAST_DSM_PASSWORD=""; log "  DSM auth failed: $(echo "$resp" | jq -c '.error // empty')"; return 1; }
   sid=$(echo "${resp}" | jq -r '.data.sid')
+  # v0.5.5: stash for render_map. NOT printed; only the SID goes to stdout.
+  HITHER_LAST_DSM_PASSWORD="${password}"
   printf '%s\n' "${sid}"
 }
 
@@ -233,19 +277,40 @@ dsm_list_smb_readable_shares() {
 # ---------------------------------------------------------------------------
 
 render_map() {
-  # Args: <nas-host>
+  # Args: <nas-host> <password>
   # Reads share names on stdin, emits an /etc/hither_<nas> file body.
-  local nas="$1"
+  #
+  # v0.5.5: the password is URL-encoded and embedded into each map line
+  # between the user and the `@` separator:
+  #   ://<user>:<URL_ENCODED_PW>@<host>/<share>
+  #
+  # Why on-disk cleartext: macOS `mount_smbfs` cannot reliably authenticate
+  # via Keychain entries created by the `security` CLI — only Finder's
+  # Cmd-K creates entries with the right ACL+attribute hookup. NetFS /
+  # AppleScript / Finder all work with our CLI-created Keychain entries,
+  # but `mount_smbfs` (which `automountd` invokes internally) rejects them
+  # with "Authentication error" even though the byte-for-byte password match
+  # is correct. Forcing the user to Cmd-K once after `hither subscribe`
+  # defeats the fully-automated goal. URL-embedded creds work every time
+  # without any Keychain lookup.
+  #
+  # Threat-model summary: the file is written mode 0600 (root r+w only) by
+  # hither-write-map. Anyone with root on the Mac could `security
+  # find-internet-password -w` the same password out of Keychain — so the
+  # on-disk form does NOT widen the attack surface. See docs/design-decisions.md.
+  local nas="$1" password="$2"
+  local encoded_pw
+  encoded_pw=$(url_encode "${password}")
   printf '# /etc/hither_%s — AutoFS indirect map.\n' "${nas}"
   printf '# MANAGED BY hither sync — DO NOT EDIT BY HAND.\n'
   printf '# Generated: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
   printf '# Target user: %s\n' "${TARGET_USER}"
-  printf '# Format: <share-key>  -fstype=smbfs,soft  ://<user>@<host>/<share>\n'
+  printf '# Format: <share-key>  -fstype=smbfs,soft  ://<user>:<url-encoded-pw>@<host>/<share>\n'
   printf '\n'
   while IFS= read -r share; do
     [[ -z "${share}" ]] && continue
-    printf '%-50s -fstype=smbfs,soft ://%s@%s/%s\n' \
-      "${share}" "${TARGET_USER}" "${nas}" "${share}"
+    printf '%-50s -fstype=smbfs,soft ://%s:%s@%s/%s\n' \
+      "${share}" "${TARGET_USER}" "${encoded_pw}" "${nas}" "${share}"
   done
 }
 
@@ -450,6 +515,9 @@ apply_map_if_changed() {
 
 log "hither-sync start (target_user=${TARGET_USER}, nas_list='${NAS_LIST}')"
 
+# v0.5.5: script-scope. Set by dsm_login on success; consumed by render_map.
+HITHER_LAST_DSM_PASSWORD=""
+
 exit_code=0
 for nas in ${(z)NAS_LIST}; do
   log "processing ${nas}"
@@ -479,13 +547,18 @@ for nas in ${(z)NAS_LIST}; do
     else
       share_count=$(printf '%s\n' "${shares}" | wc -l | tr -d ' ')
       log "  ${share_count} visible shares"
+      # v0.5.5: pass cleartext password (resolved by dsm_login) to render_map
+      # for URL-encoded embedding in the map line. See render_map docblock
+      # for the why; the file is written mode 0600 by hither-write-map.
       printf '%s\n' "${shares}" \
-        | render_map "${nas}" \
+        | render_map "${nas}" "${HITHER_LAST_DSM_PASSWORD}" \
         | apply_map_if_changed "${nas}" \
         || exit_code=1
     fi
   } always {
     dsm_logout "${nas}" "${sid}"
+    # v0.5.5: scrub the cleartext from the script-scope var between NASes.
+    HITHER_LAST_DSM_PASSWORD=""
   }
 done
 

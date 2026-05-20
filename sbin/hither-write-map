@@ -49,7 +49,14 @@ trap 'rm -f "${tempfile}" 2>/dev/null || true' EXIT
 # --- Read bounded stdin into the tempfile ---
 # 1 MiB cap is ~50x larger than the largest known map (~20 KiB)
 # Use mktemp-style + chmod-then-rename for atomicity
-umask 022
+#
+# v0.5.5: umask 077 so the tempfile is born mode 0600. The map now contains
+# URL-encoded cleartext SMB credentials (see libexec/hither-sync.sh::render_map
+# docblock for the why). The final mode 0600 below makes the file unreadable
+# to non-root users. automountd runs as root and reads the file directly,
+# so mount lookups are unaffected. Users `cd /Hither/<nas>/<share>` — that
+# path is mediated by autofs, not by user-side reads of /etc/hither_<host>.
+umask 077
 if ! head -c 1048576 > "$tempfile"; then
   rm -f "$tempfile"
   echo "ERROR: failed to write tempfile ${tempfile}" >&2
@@ -63,7 +70,8 @@ if [[ ! -s "$tempfile" ]]; then
   exit 5
 fi
 
-chmod 644 "$tempfile"
+# v0.5.5: 0600 (was 0644). See umask comment above.
+chmod 600 "$tempfile"
 chown root:wheel "$tempfile"
 
 # --- Atomic rename (POSIX rename(2) is atomic on same filesystem) ---

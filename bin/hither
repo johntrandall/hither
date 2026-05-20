@@ -29,7 +29,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-HITHER_VERSION="0.5.4"
+HITHER_VERSION="0.5.5"
 VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
 export HITHER_VERSION
 
