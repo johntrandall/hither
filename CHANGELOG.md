@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.2] — 2026-05-20
+
+Iterative-verification round-2 fixes. Round 2 ran 3 verifiers in parallel against v0.5.1; all 5 round-1 doc fixes were confirmed landed, all 7 round-1 notification code-path fixes were confirmed landed, all 4 v0.4.1 fixes were confirmed intact, the test-suite gaps were closed. Round 2 surfaced one warning (this release) plus 3 low-severity cosmetic nits (deferred).
+
+### Fixed
+- **`bin/hither` inline `--help` text for `hither sync`** was stale after the v0.5.1 cmd_sync any-true OR-aggregation. The help string said "default is to read the first subscription's notify_on_changes" — the code had been changed to OR-aggregate across all subscriptions. The text now matches the code: "default is the any-true OR-aggregation across all subscriptions (matches the scheduled LaunchAgent's behavior)." Also: the sync help now lists all four `--notify` flag forms (`--notify` / `--no-notify` / `--notify=true` / `--notify=false`) for parity with the README CLI table.
+- **`.github/workflows/ci.yml`** — pinned `ludeeus/action-shellcheck` from `@master` to the v2.0.0 release sha (`00cae500b08a931fb5698e11e79bfbd38e612a38`). Removes the reproducibility risk of a floating-tag dependency on a third-party Action.
+
+### Accepted nits (deliberately not fixed)
+- Test-fixture `schedule_hour = 4` / `schedule_minute = 23` values inlined in `tests/test-notify-diff.sh` and `tests/test-launchagent-env.sh` stub TOMLs. Test fixtures are not load-bearing config; inline is reasonable.
+- The `trap "rm -rf ${tmpdir}" EXIT` in `tests/test-launchagent-env.sh` is overwritten across cases — in practice the failure window is empty (each case sets its own trap before doing anything destructive), so this is a cosmetic robustness note rather than a real bug.
+
+### Version
+- `bin/hither` `HITHER_VERSION` → `0.5.2`
+- `Formula/hither.rb` `version` → `0.5.2`
+
 ## [0.5.1] — 2026-05-20
 
 Iterative-verification round-1 fixes on v0.5.0. All bugs caught before publication.

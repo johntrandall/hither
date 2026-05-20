@@ -9,10 +9,10 @@
 class Hither < Formula
   desc "Lazy mounter for personal Mac SMB fleets — autofs + DSM + Keychain"
   homepage "https://github.com/johntrandall/hither"
-  url "https://github.com/johntrandall/hither/archive/refs/tags/v0.5.1.tar.gz"
+  url "https://github.com/johntrandall/hither/archive/refs/tags/v0.5.2.tar.gz"
   sha256 "PLACEHOLDER_FILLED_AT_RELEASE_TIME"
   license "MIT"
-  version "0.5.1"
+  version "0.5.2"
 
   depends_on :macos
   depends_on macos: :sequoia # 15.0+; symlink-form synthetic.conf is tested on 15.7.x

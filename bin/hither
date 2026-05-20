@@ -29,7 +29,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-HITHER_VERSION="0.5.1"
+HITHER_VERSION="0.5.2"
 VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
 export HITHER_VERSION
 
@@ -74,11 +74,12 @@ Usage:
       Tabular view of subscriptions: NAS / user / proto / schedule /
       share count / last sync age.
 
-  hither sync [<nas>] [--notify|--no-notify]
+  hither sync [<nas>] [--notify|--no-notify|--notify=true|--notify=false]
       Fire the sync now. Without args: every subscription. With <nas>:
-      that one only. --notify / --no-notify override the per-subscription
-      notify_on_changes setting for this one invocation; default is to
-      read the first subscription's notify_on_changes.
+      that one only. --notify / --no-notify (and the =true/=false forms)
+      override the global notify_on_changes for this one invocation; the
+      default is the any-true OR-aggregation across all subscriptions
+      (matches the scheduled LaunchAgent's behavior).
 
   hither status
       One-screen status: both daemons' load state, file state,
