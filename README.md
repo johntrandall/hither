@@ -160,6 +160,15 @@ Hither itself has no Python, no Node, no Go runtime. It's a few hundred lines of
 
 Under active development on the author's primary Mac. The same DSM-API-to-autofs-map flow has been running daily in an earlier form (a centrally-scheduled job) since early May 2026; v0.2.0+ is a self-contained refactor of that flow. **v1.0 will be cut after a clean 30-day burn-in of the LaunchAgent form.** Until then, expect minor changes — the on-disk subscription format and CLI surface are not expected to change incompatibly, but no promises until v1.0.
 
+## Troubleshooting
+
+A few non-obvious operational surfaces:
+
+- **`hither sync` silently no-ops.** A single-flight lock prevents two concurrent sync invocations (the daily LaunchAgent fire + a manual run). If a sync was SIGKILL'd, the lock at `~/Library/Caches/hither/sync.lock` will be auto-broken after **10 minutes** (or immediately if the system clock skew is negative). To force-clear: `rmdir ~/Library/Caches/hither/sync.lock`.
+- **Sync silently fails after DSM password change.** Hither stores the DSM credential in macOS Keychain. After you rotate the NAS-side password, re-run `hither subscribe <nas> --user <dsm-user>` to re-prompt and refresh the Keychain entry. If you have `notify_on_changes` enabled, the next sync after a rotation will fire a "DSM auth failed" notification with the actionable hint.
+- **`/Hither/<nas>/<share>` shows "No such file or directory" after install.** Most installs materialize `/Hither` via `apfs.util -t` in the same bootstrap pass. If that didn't take (rare; observed once on macOS 15.7.7), reboot once and re-check.
+- **Notifications enabled on a sub I thought was silent.** `HITHER_NOTIFY` is a single global env var on the LaunchAgent, OR-aggregated across all subscriptions. Adding a new sub with default-true notify enables notifications for ALL existing subs on the same Mac. To keep an upgraded v0.4.x sub silent, set `notify_on_changes = false` in `~/.config/hither/subscriptions/<nas>.toml` explicitly. Per-NAS notification gating is post-v1.0.
+
 ## Contributing
 
 Issues and PRs welcome. For substantive changes, please open an issue first so we can talk about scope — Hither's design north star is *self-contained per-Mac tool*, and features that pull state out of the Mac (a sync server, a fleet console, a shared config repo) are deliberately out of scope.

@@ -27,3 +27,5 @@ jobs:
         run: zsh tests/test-notify-diff.sh
       - name: Run LaunchAgent env tests
         run: zsh tests/test-launchagent-env.sh
+      - name: Run sync lock tests
+        run: zsh tests/test-sync-lock.sh

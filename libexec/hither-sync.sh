@@ -121,8 +121,12 @@ if [[ "${HITHER_SKIP_LOCK:-0}" != "1" ]]; then
   if [[ -d "${LOCK}" ]]; then
     lock_mtime=$(stat -f %m "${LOCK}" 2>/dev/null || echo 0)
     lock_age=$(( $(date +%s) - lock_mtime ))
-    if (( lock_age > LOCK_TTL_SEC )); then
-      log "[warn] stale lock ${LOCK} (${lock_age}s > ${LOCK_TTL_SEC}s TTL) — breaking"
+    # Two stale conditions: age > TTL (the normal case), OR age < 0 (clock
+    # skew — lock has a future mtime, which can happen on first-boot Macs
+    # before NTP sync, or after manual `date` rewrites). Either way the
+    # lock is unreliable; break it.
+    if (( lock_age > LOCK_TTL_SEC )) || (( lock_age < 0 )); then
+      log "[warn] stale lock ${LOCK} (age=${lock_age}s, TTL=${LOCK_TTL_SEC}s — clock skew if negative) — breaking"
       rmdir "${LOCK}" 2>/dev/null || true
     fi
   fi

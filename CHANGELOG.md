@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.4] — 2026-05-20
+
+Iterative-verification round-4 fixes. v0.5.3's adversarial-round closures were all verified landed. Round 4 itself surfaced 1 bug + 2 important items + 4 nits; this release lands the bug + 2 importants and explicitly accepts the 4 nits with notes.
+
+### Fixed
+- **`tests/test-sync-lock.sh` was not wired into CI.** `.github/workflows/ci.yml` ran `test-notify-diff.sh` and `test-launchagent-env.sh` on macos-latest but not the new v0.5.3 sync-lock test. Added the third `run: zsh tests/test-sync-lock.sh` step. All 47 tests now gate every PR.
+- **System-clock skew defeated the single-flight lock's stale-TTL break.** The lock-age math (`$(date +%s) - lock_mtime`) yields a NEGATIVE value when the wall clock is in the past (first-boot Macs before NTP sync; manual `date` rewinds). The `lock_age > LOCK_TTL_SEC` check is then false, and a future-mtime'd lock persisted until manual `rmdir`. v0.5.4 also treats `lock_age < 0` as stale and breaks the lock. The log message includes "clock skew if negative" so operators can distinguish the two cases.
+- **600-second lock TTL was undocumented user-facing.** An operator who SIGKILL'd a sync and ran `hither sync` again would see silent no-ops for 10 minutes with no canonical place to look. Added a new "Troubleshooting" README section covering: the lock + 10-minute auto-clear, the `rmdir` manual override, stale-Keychain recovery via `hither subscribe`, the post-install `/Hither` reboot fallback, and the `HITHER_NOTIFY` global-OR upgrade-path footgun.
+
+### Accepted nits (deliberately not fixed)
+- **`$HOME` not pinned in `launchd/com.johnrandall.hither.sync.plist`'s `EnvironmentVariables`.** Defense-in-depth: GUI-context LaunchAgents inherit `HOME` from the user record, so this is reliable in practice. Pinning would require the `__HOME__` install-time substitution to expand a second key in the plist. Lower priority than the actual lock+notification correctness fixes.
+- **`stat -f %m` is macOS/BSD-only.** No `[[ "$(uname)" == "Darwin" ]]` guard. Hither is macOS-only by Formula declaration (`depends_on macos: :sequoia`); the Linux risk is theoretical. Not worth the guard noise.
+- **`~/Library/Caches/` purge race.** macOS can evict items under `Caches` under disk pressure. If it evicts mid-sync, the EXIT trap's `rmdir ... 2>/dev/null || true` swallows harmlessly. A second concurrent caller would succeed during the gap. Probabilistically negligible. Moving to `~/Library/Application Support/hither/lock/` would be more durable but is v0.6 work.
+- **Test extraction's comment-pattern keying in `tests/test-sync-lock.sh`** is brittle to comment rewording. Has a sanity-check guard at the extract-function call site. Not worth a refactor.
+
+### Version
+- `bin/hither` `HITHER_VERSION` → `0.5.4`
+- `Formula/hither.rb` `version` → `0.5.4`
+
 ## [0.5.3] — 2026-05-20
 
 Adversarial-round fixes on v0.5.2. Six must-fix items addressed; three architectural items deferred to v0.6 (documented below).
