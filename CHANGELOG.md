@@ -1,5 +1,123 @@
 # Changelog
 
+## [0.4.0] — 2026-05-20
+
+Public-release polish pass. The repo is intended to flip from private to
+public after this version lands. Every operator-facing file — README,
+glossary, architecture, design-decisions, plist `ServiceDescription`
+strings, comments in `libexec/hither-sync.sh` and `sbin/hither-write-map`
+— has been audited to remove internal hostnames and internal-only
+references. The architecture, CLI, and on-disk layout are unchanged.
+
+### Privacy audit (per the `publish-pre-flight-audit` skill)
+
+What changed:
+
+- **README rewritten** for an audience that is *not* the author.
+  Strangers-first framing: hero one-liner + concrete `ls` example,
+  problem statement (autofs reverts, `/Network` clash, sudoers
+  wildcards, Keychain duplication), Homebrew install path as the
+  recommended way, manual install as the fallback, CLI surface as one
+  reference table. Internal hostnames and the author's username are
+  replaced with `<nas>` / `<dsm-user>` placeholders. The previous
+  README's deep-internal context (Forgejo URLs, lash references in the
+  install path) is gone.
+- **`docs/glossary.md`** — dropped John-specific infrastructure terms
+  (`xyOps`, `xysat`, `infra-agent`, `Umbridge`, `SusanBones`, `lash`).
+  Kept the macOS-subsystem terms (autofs, automountd, synthetic.conf,
+  apfs.util, SSV, Keychain, LaunchDaemon, LaunchAgent, WatchPaths) and
+  added SMB / DSM / indirect-map definitions.
+- **`docs/architecture.md`** — replaced the `umbridge` / `johntrandall`
+  example values with `<nas>` / `<user>` placeholders in the sequence
+  diagram and TOML example. The "No Conductor, no Forgejo, no external
+  secret store" line is now "No orchestrator, no external secret store,
+  no sync server."
+- **`docs/design-decisions.md`** — stripped the v0.2.0 xyOps-to-LaunchAgent
+  migration narrative (which referenced `infra-agent`, `Conductor`,
+  `Forgejo`, internal hostnames). The architectural conclusion is
+  preserved as the "Why a LaunchAgent for sync, not a LaunchDaemon"
+  section, framed forward-looking instead of as a transition story.
+  The "Why credential resolution is env-var-then-Keychain (no 1Password)"
+  section replaces the "Why drop the 1Password fallback (v0.2.0)" historical
+  note. The `umbridge` / `hedwig` / `johntrandall` references in path
+  examples are now `<nas>` / `<name>`.
+- **`docs/roadmap.md`** — internal planning artifact. Trashed (moved to
+  the user trash, not git-deleted; recoverable for the author).
+- **`launchd/com.johnrandall.hither.bootstrap.plist`** —
+  `ServiceDescription` stripped of:
+  - `umbridge`/`hedwig` example hostnames (replaced with generic
+    "wiping previously-installed indirect-map entries"),
+  - `/etc/sudoers.d/xysat-hither-sync` reference (now correctly references
+    `/etc/sudoers.d/hither-write-map` and the `%admin` grant model),
+  - the field-report internal URL and ADR-NNN reference.
+  Also: `ProgramArguments` no longer hardcodes `umbridge`. The daemon
+  now iterates `/etc/hither_*` and re-applies the auto_master line for
+  whichever NAS subscriptions exist on disk.
+- **`launchd/com.johnrandall.hither.sync.plist`** — `ServiceDescription`
+  reference to internal ADR scrubbed. The `EnvironmentVariables` defaults
+  for `TARGET_USER` and `NAS_LIST` are now `PLACEHOLDER_USER` and
+  `PLACEHOLDER_NAS` (overwritten on first `hither subscribe`). An XML
+  comment in the plist documents that these are placeholders.
+- **`libexec/hither-sync.sh`** — header comments rewritten to drop the
+  "Where this runs: Each Mac's xysat worker runs this locally" framing.
+  The current text describes the LaunchAgent + `hither sync` execution
+  contexts. Placeholder defaults updated to match the plist
+  (`PLACEHOLDER_USER` / `PLACEHOLDER_NAS`).
+- **`sbin/hither-write-map`** — header rewritten. The reference to
+  `xysat (running as infra-agent)` is now "the user's LaunchAgent (or
+  `hither sync`)". The path-traversal vulnerability description is
+  generalized to "older auto-smb sync schemes."
+- **`scripts/doctor.sh`** — the hardcoded `for host in umbridge` loop
+  is replaced with subscription-driven iteration over
+  `~/.config/hither/subscriptions/*.toml`, with a fallback to
+  whatever indirect maps exist at `/etc/hither_*`. The hardcoded
+  `find-internet-password -s umbridge -a johntrandall` check now reads
+  the host + user from each subscription's TOML.
+
+What deliberately did NOT change:
+
+- **The LaunchDaemon Label `com.johnrandall.hither.bootstrap` and
+  LaunchAgent Label `com.johnrandall.hither.sync`** still carry the
+  original author's name as the reverse-DNS prefix. These Labels are
+  baked into existing installs (the author's primary Mac has been
+  running them since 2026-05-19); renaming would break upgrade paths
+  for anyone already running v0.1-v0.3. Both plists now include a
+  `Note on the Label` paragraph in `ServiceDescription` explaining why
+  the name is historical and that it isn't going to change.
+- **The sudoers grant model** — `%admin ALL=(root) NOPASSWD:
+  /usr/local/sbin/hither-write-map ^[a-z0-9-]+$`. Generic, regex-bounded,
+  no John-specific account names.
+- **The Keychain credential model** — unchanged. Keychain is the canonical
+  store; the env-var override path is preserved.
+- **`bin/hither` CLI surface** — unchanged. Only the
+  `bootstrap_user_phase` placeholder comment was tightened.
+
+### Added
+
+- **`Formula/hither.rb`** — Homebrew formula. Installs `bin/hither` to
+  the Cellar, libexec scripts to `libexec/`, the bootstrap / launchd /
+  sbin / sudoers / scripts / completions trees to `pkgshare`, and bash
+  + zsh completions to the Homebrew-standard locations. The `caveats`
+  block documents the two-phase bootstrap and the reboot requirement.
+  The `sha256` is a placeholder filled at release time against the
+  GitHub release tarball.
+- **`docs/HOMEBREW.md`** — procedure for setting up the
+  `johntrandall/homebrew-hither` tap repo. The formula lives in this
+  repo as the source of truth; the tap repo is a mirror.
+
+### Status
+
+The Homebrew tap (`github.com/johntrandall/homebrew-hither`) does NOT
+exist yet. v0.4.0 ships the formula in this repo as the canonical
+source; the operator publishes the tap as a follow-up. README
+documents the tap path as the recommended install method with a note
+that the tap is coming.
+
+### Version bump
+
+- `bin/hither` `HITHER_VERSION` → `0.4.0`
+- `Formula/hither.rb` `version` → `0.4.0`
+
 ## [0.3.1] — 2026-05-20
 
 Repo cleanup — the xyOps coupling that v0.2.0 made dead code is now actually deleted, the sudoers file is renamed to match the wrapper it grants, and the bootstrap installs the sudoers grant automatically (was previously a manual operator step).

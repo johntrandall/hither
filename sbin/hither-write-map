@@ -3,11 +3,13 @@
 # /usr/local/sbin/hither-write-map
 #
 # Root-owned wrapper for the single sudoers grant Hither needs on each Mac.
-# Replaces the path-traversable `infra-agent ALL=(root) NOPASSWD: /usr/bin/tee /etc/auto_smb_*`
-# pattern that the prior auto-smb-sync system used (sudoers wildcards in argument
-# position match `/`, allowing /etc/auto_smb_../sudoers.d/evil escape).
+# Replaces the path-traversable
+#   <user> ALL=(root) NOPASSWD: /usr/bin/tee /etc/auto_smb_*
+# pattern that older auto-smb sync schemes use (sudoers wildcards in
+# argument position match `/`, allowing /etc/auto_smb_../sudoers.d/evil
+# escape — see docs/design-decisions.md).
 #
-# Invoked by xysat (running as infra-agent) via:
+# Invoked by the user's LaunchAgent (or `hither sync`) via:
 #   echo "<map body>" | sudo -n /usr/local/sbin/hither-write-map <host>
 #
 # Validates ${host} matches ^[a-z0-9-]+$ (whitelist; rejects traversal,

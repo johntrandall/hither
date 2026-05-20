@@ -29,7 +29,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-HITHER_VERSION="0.3.1"
+HITHER_VERSION="0.4.0"
 VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
 export HITHER_VERSION
 
@@ -39,13 +39,14 @@ export HITHER_VERSION
 
 usage() {
   cat <<EOF
-hither ${HITHER_VERSION} — lazy mounter for personal Mac fleets
+hither ${HITHER_VERSION} — lazy mounter for personal Mac SMB fleets
 
 Usage:
   hither bootstrap [--reapply-only|--user-only|--root-only]
       Install (or re-apply) /etc/synthetic.conf, /etc/auto_master, the
       hither-write-map wrapper, the LaunchDaemon (revert defender), and
-      the LaunchAgent (daily sync). Idempotent.
+      the LaunchAgent (daily sync). Idempotent. Reboot required after
+      first install to materialize /Hither.
 
       Two phases:
         sudo \$(which hither) bootstrap        # root phase
@@ -165,9 +166,12 @@ bootstrap_root_phase() {
     /etc/sudoers.d/hither-write-map
   echo "[ok] installed /etc/sudoers.d/hither-write-map"
 
-  # 3c. Remove the legacy v0.1/v0.2 sudoers file if present. Old installs
-  # had /etc/sudoers.d/xysat-hither-sync granting infra-agent; v0.3.0 ships
-  # /etc/sudoers.d/hither-write-map granting %admin.
+  # 3c. Remove the legacy v0.1/v0.2 sudoers file if present. Pre-v0.3.0
+  # installs shipped a sudoers file at /etc/sudoers.d/xysat-hither-sync
+  # granting a specific service account; v0.3.0+ ships
+  # /etc/sudoers.d/hither-write-map granting %admin (the generic, public
+  # form). This block is a no-op on fresh installs — only runs if the
+  # old file is present from an upgrade path.
   if [[ -f /etc/sudoers.d/xysat-hither-sync ]]; then
     rm -f /etc/sudoers.d/xysat-hither-sync
     echo "[ok] removed legacy /etc/sudoers.d/xysat-hither-sync"
@@ -221,9 +225,9 @@ bootstrap_user_phase() {
   plutil -lint "${agent_dst}" >/dev/null || die "${agent_dst} failed plutil -lint after install"
 
   # If we have subscriptions, re-render the env block now. Otherwise the
-  # plist sits with the template values (TARGET_USER=johntrandall,
-  # NAS_LIST=umbridge) which are placeholders — they won't be used until
-  # the user runs `hither subscribe`, which calls refresh_launchagent_env.
+  # plist sits with its template placeholder values — they won't be used
+  # until the user runs `hither subscribe`, which calls
+  # refresh_launchagent_env to materialize the real env block.
   if [[ -n "$(hither_sub_list_names)" ]]; then
     hither_refresh_launchagent_env
   else

@@ -60,8 +60,25 @@ else
 fi
 
 # --- 5. For each subscribed host: probe shares with timeout ---
-# (For v1, the host list is hardcoded as umbridge; v2 reads config.)
-for host in umbridge; do
+# Subscriptions live at ~/.config/hither/subscriptions/<nas>.toml. Fall
+# back to whatever indirect maps are present in /etc/hither_* if no
+# subscriptions exist yet (catches operator-installed configs).
+hosts=""
+if [[ -d "${HOME}/.config/hither/subscriptions" ]]; then
+  hosts=$(find "${HOME}/.config/hither/subscriptions" -name '*.toml' -maxdepth 1 \
+    -exec basename {} .toml \; 2>/dev/null | sort)
+fi
+if [[ -z "${hosts}" ]]; then
+  hosts=$(find /etc -maxdepth 1 -name 'hither_*' ! -name '*.needs-reload' \
+    -exec basename {} \; 2>/dev/null | sed 's/^hither_//' | sort)
+fi
+if [[ -z "${hosts}" ]]; then
+  warn "no subscriptions found — run: hither subscribe <nas> --user <dsm-user>"
+  echo "=== doctor done (exit ${EXIT}) ==="
+  exit ${EXIT}
+fi
+
+for host in ${hosts}; do
   echo "--- Probing /Hither/${host}/ ---"
 
   if [[ ! -d "/Hither/${host}" ]]; then
@@ -98,12 +115,26 @@ for host in umbridge; do
   fi
 done
 
-# --- 6. Keychain entry for SMB ---
-if security find-internet-password -s umbridge -a johntrandall >/dev/null 2>&1; then
-  ok "Keychain entry for //johntrandall@umbridge present"
-else
-  warn "Keychain missing entry //johntrandall@umbridge — prime via Finder Cmd-K"
-fi
+# --- 6. Keychain entry for SMB (one per subscribed host) ---
+# Look up TARGET_USER from each subscription's TOML; check that the
+# Keychain has a matching SMB credential for that user+host.
+for host in ${hosts}; do
+  sub_path="${HOME}/.config/hither/subscriptions/${host}.toml"
+  if [[ ! -f "${sub_path}" ]]; then
+    continue
+  fi
+  user=$(awk -F'=' '/^[[:space:]]*user[[:space:]]*=/ {
+    sub(/^[^=]*=[[:space:]]*/, "", $0); gsub(/^"|"$/, "", $0); print; exit
+  }' "${sub_path}")
+  if [[ -z "${user}" ]]; then
+    continue
+  fi
+  if security find-internet-password -s "${host}" -a "${user}" >/dev/null 2>&1; then
+    ok "Keychain entry for //${user}@${host} present"
+  else
+    warn "Keychain missing entry //${user}@${host} — prime via Finder Cmd-K or re-subscribe"
+  fi
+done
 
 echo "=== doctor done (exit ${EXIT}) ==="
 exit ${EXIT}

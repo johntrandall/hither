@@ -12,13 +12,15 @@ Purpose: Fires once daily at 04:23 local time. Calls the DSM Web API as TARGET_U
 
 Context: Runs as a LaunchAgent under the user's GUI session — NOT a LaunchDaemon. The user-context requirement is load-bearing: DSM password lookup via `security find-internet-password` requires Keychain access, which is only available in a GUI-session security context. The same Keychain entry that Finder Cmd-K uses for SMB mounts is the one this agent reads. Running this work as root via LaunchDaemon was tried and rejected (Keychain access fails under launchd-root with errSecAuthFailed -25293).
 
-Dependencies: requires /usr/local/libexec/hither/hither-sync.sh (root-owned, mode 0755 — installed by `hither bootstrap`); /usr/local/sbin/hither-write-map (root-owned, mode 0755); /etc/sudoers.d/hither-write-map granting this user NOPASSWD on the wrapper for the configured NAS hostnames; a Keychain entry for each NAS in NAS_LIST keyed (server=$NAS, account=$TARGET_USER). Network reachability to the NAS (LAN or Tailscale) at fire time.
+Dependencies: requires /usr/local/libexec/hither/hither-sync.sh (root-owned, mode 0755 — installed by `hither bootstrap`); /usr/local/sbin/hither-write-map (root-owned, mode 0755); /etc/sudoers.d/hither-write-map granting this user NOPASSWD on the wrapper for the configured NAS hostnames; a Keychain entry for each NAS in NAS_LIST keyed (server=$NAS, account=$TARGET_USER). Network reachability to the NAS (LAN, or whatever overlay you've routed it through) at fire time.
 
 Operation: stdout → ~/Library/Logs/hither/sync.log; stderr → ~/Library/Logs/hither/sync.stderr.log. Use `launchctl print gui/$(id -u)/com.johnrandall.hither.sync` to inspect state. Use `launchctl kickstart gui/$(id -u)/com.johnrandall.hither.sync` to fire manually (or `hither sync` for the same effect from a user shell). Use `launchctl bootout gui/$(id -u)/com.johnrandall.hither.sync` to disable.
 
 Sibling: com.johnrandall.hither.bootstrap (LaunchDaemon, root context, defends /etc/synthetic.conf + /etc/auto_master against macOS update reverts). The two daemons have non-overlapping roles — defender does local file repair only (no network), sync does the network/API/credential work (no file repair). Splitting them by privilege/context is what makes Hither self-contained on a single Mac.
 
-References: github.com/johntrandall/hither; admin-technical ADR-NNN (Hither lazy-mounter); design-decisions.md "Why a LaunchAgent for sync, not a LaunchDaemon".</string>
+Note on the Label: `com.johnrandall.hither.sync` carries the original author's name as the reverse-DNS prefix. This is historical; the Label is baked into existing installs and is not renamed in v0.4.0 to avoid breaking upgrade paths.
+
+References: github.com/johntrandall/hither; docs/architecture.md; docs/design-decisions.md "Why a LaunchAgent for sync, not a LaunchDaemon".</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -40,10 +42,22 @@ References: github.com/johntrandall/hither; admin-technical ADR-NNN (Hither lazy
     <dict>
         <key>PATH</key>
         <string>/usr/local/sbin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/sbin:/usr/bin:/sbin:/bin</string>
+        <!--
+            TARGET_USER and NAS_LIST below are PLACEHOLDERS. They are
+            overwritten in-place by `hither subscribe` / `hither unsubscribe`
+            (via hither_refresh_launchagent_env in libexec/hither-lib.sh)
+            to materialize the user's actual DSM identity and the list of
+            subscribed NAS hostnames. The plist on disk after the first
+            subscribe holds real values; this template only ships them as
+            placeholders so plutil -lint passes against the unsubstituted
+            template. Until at least one subscription exists, the agent's
+            fire will resolve these placeholders and exit non-zero — which
+            is the intended signal to run `hither subscribe`.
+        -->
         <key>TARGET_USER</key>
-        <string>johntrandall</string>
+        <string>PLACEHOLDER_USER</string>
         <key>NAS_LIST</key>
-        <string>umbridge</string>
+        <string>PLACEHOLDER_NAS</string>
         <key>NAS_PROTO</key>
         <string>http</string>
     </dict>

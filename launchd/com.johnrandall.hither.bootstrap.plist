@@ -8,21 +8,23 @@
     <key>ServiceDescription</key>
     <string>Hither bootstrap re-applier — defends /etc/synthetic.conf and /etc/auto_master against macOS update reverts.
 
-Purpose: Re-apply the `Hither` entry to /etc/synthetic.conf and the `/Hither/{host} hither_{host} -nosuid` indirect-map entries to /etc/auto_master at every boot, and whenever those files are modified at runtime. This survives the macOS minor-update behavior of resetting /etc/auto_master to its shipping default (observed on 2026-05-15 when macOS 15.7.7 wiped both /Network/umbridge and /Network/hedwig entries that had been installed by the prior auto-smb-sync setup script).
+Purpose: Re-apply the `Hither` entry to /etc/synthetic.conf and the `/Hither/{host} hither_{host} -nosuid` indirect-map entries to /etc/auto_master at every boot, and whenever those files are modified at runtime. This survives the macOS minor-update behavior of resetting /etc/auto_master to its shipping default (observed on macOS 15.7.7 wiping previously-installed indirect-map entries).
 
-Context: Runs as root at boot via RunAtLoad. Also runs whenever /etc/synthetic.conf or /etc/auto_master changes (WatchPaths). Performs ONLY local file edits + `apfs.util -t` + `automount -cv`. ZERO network calls — safe to run before Tailscale/DNS is up. ZERO mount probes (no stat/ls/cat under /Hither/{host}/) — autofs would attempt a root-context mount with no Keychain access, breaking the share.
+Context: Runs as root at boot via RunAtLoad. Also runs whenever /etc/synthetic.conf or /etc/auto_master changes (WatchPaths). Performs ONLY local file edits + `apfs.util -t` + `automount -cv`. ZERO network calls — safe to run before networking (Wi-Fi, DHCP, DNS, any overlay VPN) is up. ZERO mount probes (no stat/ls/cat under /Hither/{host}/) — autofs would attempt a root-context mount with no Keychain access, breaking the share.
 
-Dependencies: requires /usr/local/sbin/hither-write-map to be installed (root-owned, mode 0755) and /usr/local/libexec/hither/{add-synthetic-root,apply-auto-master}.sh (root-owned, mode 0755) — the bootstrap scripts that this daemon executes. Requires /etc/sudoers.d/xysat-hither-sync (granting infra-agent NOPASSWD on the wrapper). EnvironmentVariables.PATH is set explicitly because launchd-spawned processes inherit a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin); we extend it for the Hither CLI's own internal calls.
+Dependencies: requires /usr/local/sbin/hither-write-map to be installed (root-owned, mode 0755) and /usr/local/libexec/hither/{add-synthetic-root,apply-auto-master}.sh (root-owned, mode 0755) — the bootstrap scripts that this daemon executes. Requires /etc/sudoers.d/hither-write-map (granting %admin NOPASSWD on the wrapper, regex-restricted to bare hostnames). EnvironmentVariables.PATH is set explicitly because launchd-spawned processes inherit a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin); we extend it for the Hither CLI's own internal calls.
 
 Operation: stdout → /var/log/hither/bootstrap.stdout.log; stderr → /var/log/hither/bootstrap.stderr.log. Use `sudo launchctl print system/com.johnrandall.hither.bootstrap` to inspect state. Use `sudo launchctl kickstart system/com.johnrandall.hither.bootstrap` to fire manually. Use `sudo launchctl bootout system/com.johnrandall.hither.bootstrap` to disable.
 
-References: github.com/johntrandall/hither, admin-technical ADR-NNN (Hither lazy-mounter), field-report 2026-05-19 capturing the May-15 macOS-update auto_master revert that motivated this daemon.</string>
+Note on the Label: `com.johnrandall.hither.bootstrap` carries the original author's name as the reverse-DNS prefix. This is historical; the Label is baked into existing installs and is not renamed in v0.4.0 to avoid breaking upgrade paths. Operators inspecting `launchctl list` will see the johnrandall prefix; this is expected.
+
+References: github.com/johntrandall/hither, docs/architecture.md, docs/design-decisions.md.</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>/bin/bash /usr/local/libexec/hither/add-synthetic-root.sh &amp;&amp; /bin/bash /usr/local/libexec/hither/apply-auto-master.sh umbridge</string>
+        <string>/bin/bash /usr/local/libexec/hither/add-synthetic-root.sh &amp;&amp; for sub in /etc/hither_*; do [ -f "$sub" ] || continue; case "$sub" in *.needs-reload) continue;; esac; host=$(basename "$sub" | sed 's/^hither_//'); /bin/bash /usr/local/libexec/hither/apply-auto-master.sh "$host"; done</string>
     </array>
 
     <key>RunAtLoad</key>

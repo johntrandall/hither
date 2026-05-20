@@ -1,198 +1,159 @@
 # Hither
 
-**Bring it here. A lazy mounter for personal Mac fleets.**
+**Bring it here.** A lazy mounter for personal Mac SMB fleets.
 
-Hither manages autofs maps so that remote SMB shares appear at predictable, stable paths under `/Hither/{host}/{share}` on every Mac in the fleet, with a LaunchDaemon that defends the system configuration against macOS update reverts.
+Hither makes the shares on your Synology (or other DSM-speaking NAS) appear at predictable, stable paths — `/Hither/<nas>/<share>` — on every Mac you own. Shares mount on first access, unmount when idle, and survive macOS updates that would normally wipe your autofs configuration.
 
-## What this is
+```
+$ ls /Hither/myserver/
+Documents  Media  Photos  Projects
 
-Apple's autofs is great when it works and miserable when it doesn't. macOS system updates routinely wipe `/etc/auto_master`, which silently breaks every indirect map on the machine until somebody notices that `cd /Network/foo` no longer triggers a mount. The historical workaround — a `sudoers` grant for `tee /etc/auto_smb_*` — turned out to be path-traversable (the `*` wildcard in a sudo argument matches `/`), making the convenience a security hole. And the `/Network` filesystem path conceptually collides with Finder's "Network" sidebar item, which is actually a Bonjour browser — confusing users who don't realize they're looking at two different things wearing the same name.
-
-Hither addresses all three problems. It mounts under `/Hither/` instead of `/Network/`, sidestepping the Finder naming clash and matching macOS's CamelCase root convention (`/Applications`, `/Library`, `/Volumes`). It uses a root-owned wrapper script with a strict `^[a-z0-9-]+$` host-name whitelist instead of a sudoers wildcard, closing the path-traversal hole. And it ships a LaunchDaemon that watches `/etc/auto_master` and `/etc/synthetic.conf`, re-applying Hither's lines whenever an OS update reverts them.
-
-There is no Hither server — Hither is a per-Mac tool. A LaunchAgent on each Mac fires daily (04:23 local), enumerates the user's SMB-readable shares via the DSM Web API, renders an autofs indirect-map body, and writes it through a root-owned wrapper. The DSM password is read from the macOS Keychain — the same entry Finder uses for SMB mounts — so there is no separate credential store, no external secret manager, no orchestrator. On the client side, autofs handles everything else: shares mount on access, unmount on idle, and the user never sees the wiring.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    DSM[DSM Web API on NAS]
-
-    subgraph Mac["Each Mac"]
-        LA["LaunchAgent: com.johnrandall.hither.sync<br/>(user GUI context, daily 04:23)"]
-        SH["/usr/local/libexec/hither/hither-sync.sh"]
-        KC[(macOS Keychain)]
-        WRAP["/usr/local/sbin/hither-write-map (root)"]
-        ETC["/etc/hither_umbridge"]
-        AM["/etc/auto_master"]
-        SC["/etc/synthetic.conf"]
-        LD["LaunchDaemon: com.johnrandall.hither.bootstrap<br/>(root context, RunAtLoad + WatchPaths)"]
-        AUTOFS[automountd]
-        USER[User: cd /Hither/umbridge/share]
-
-        LA --> SH
-        SH --> KC
-        SH --> WRAP
-        WRAP --> ETC
-        LD --> AM
-        LD --> SC
-        ETC --> AUTOFS
-        AM --> AUTOFS
-        SC --> AUTOFS
-        USER --> AUTOFS
-    end
-
-    SH -- "list_share as TARGET_USER" --> DSM
+$ cat /Hither/myserver/Documents/notes.md
+…
 ```
 
-Two daemons, clean separation, no external orchestration:
+No GUI to open, no `Connect to Server…` dialog, no broken Finder sidebar shortcuts after every OS update. The shares are just there.
 
-| Daemon | Context | Role | Network? |
-|---|---|---|---|
-| `com.johnrandall.hither.bootstrap` | LaunchDaemon (root) | Re-apply `/etc/synthetic.conf` + `/etc/auto_master` on revert | never — runs before Tailscale/Wi-Fi |
-| `com.johnrandall.hither.sync` | LaunchAgent (user) | Daily DSM API call → render map → write via `hither-write-map` | yes |
+## Why this exists
 
-The LaunchAgent runs in user GUI context, which has Keychain access. The DSM password lives in the macOS Keychain (`security add-internet-password -s <nas> -a <user>`). No 1Password dependency, no xyOps dependency, no external orchestrator.
+If you've tried to set up autofs on macOS for a personal NAS, you've probably hit some combination of:
+
+- **macOS system updates wipe `/etc/auto_master`.** The next morning, every indirect map you carefully configured is gone, and `cd /Network/myserver` silently fails until you notice.
+- **The traditional `sudoers` workaround is a security hole.** Grants like `<user> ALL=(root) NOPASSWD: /usr/bin/tee /etc/auto_smb_*` look fine, but the `*` glob matches `/` — meaning `sudo tee /etc/auto_smb_../passwd` is a legal path-traversal escape to arbitrary root file write.
+- **`/Network` is confusing.** Finder's "Network" sidebar item is a Bonjour browser; the macOS path `/Network` is autofs's traditional mount root. Two unrelated things, same name, both visible to users.
+- **Credentials want to live in two places.** macOS has Keychain. You add the share once via Finder Cmd-K, the password lives in Keychain, and that's the canonical source of truth — except every script-based mounter you find wants you to put the password somewhere else.
+
+Hither addresses all four:
+
+- A LaunchDaemon **watches `/etc/auto_master` and `/etc/synthetic.conf`** and re-applies its lines whenever macOS reverts them.
+- A root-owned **wrapper script with an `^[a-z0-9-]+$` host-name whitelist** replaces the path-traversable sudoers wildcard.
+- Mounts go under **`/Hither/`** — sidesteps the Finder/autofs naming collision, matches macOS's CamelCase root convention (`/Applications`, `/Library`, `/Volumes`).
+- Credentials come from the **macOS Keychain** — the same entry Finder Cmd-K populates for SMB mounts. No separate secret store.
 
 ## Install
 
-Hither is private through v0.4 — no Homebrew tap yet. Install from a local clone:
+The recommended install path is Homebrew via a tap:
 
 ```bash
-git clone <forgejo-umbridge:dev/hither.git> ~/dev/hither
-cd ~/dev/hither
-lash install
-
-# Root phase — installs to /etc, /usr/local, /Library/LaunchDaemons
-sudo "$(which hither)" bootstrap
-
-# User phase — installs ~/Library/LaunchAgents/com.johnrandall.hither.sync.plist
-hither bootstrap --user-only
-
-# Add your first NAS subscription. Prompts for the DSM password and stores
-# it in macOS Keychain (the same entry Finder Cmd-K populates for SMB).
-hither subscribe umbridge --user johntrandall
+brew install johntrandall/hither/hither
+sudo $(brew --prefix)/bin/hither bootstrap   # root phase
+hither bootstrap --user-only                 # user phase
 ```
 
-That's it — `subscribe` writes `~/.config/hither/subscriptions/umbridge.toml`, writes the Keychain entry, applies the `/etc/auto_master` line via `sudo`, refreshes the LaunchAgent's env block so the new NAS appears in `NAS_LIST`, and fires an initial sync. Subsequent days fire automatically at 04:23 local.
+> The Homebrew tap is being set up; until it's live, install from a local clone (see [Manual install](#manual-install) below). The `Formula/hither.rb` in this repo is the formula that will ship in the tap.
 
-The bootstrap root phase performs:
+After bootstrap, add your first NAS:
 
-1. Adds the `Hither` synthetic-root symlink entry to `/etc/synthetic.conf` and materializes `/Hither` (via `apfs.util -t`).
-2. For each existing subscription, applies the `/etc/auto_master` entry. (First-time installs have none — the loop is a no-op and prints a hint to run `hither subscribe`.)
-3. Installs the root-owned wrapper `sbin/hither-write-map` to `/usr/local/sbin/hither-write-map`.
-4. Installs the bootstrap scripts and `hither-sync.sh` to `/usr/local/libexec/hither/`.
-5. Installs and loads the LaunchDaemon at `/Library/LaunchDaemons/com.johnrandall.hither.bootstrap.plist`.
+```bash
+hither subscribe <nas> --user <dsm-user>
+```
 
-The user phase installs `~/Library/LaunchAgents/com.johnrandall.hither.sync.plist` (with `__HOME__` substituted at install time) and bootstraps it into the user's `gui/<uid>` launchd domain.
+You'll be prompted for the DSM password (input hidden). Hither stores it in the macOS Keychain — the same entry Finder Cmd-K writes — and fires an initial sync. After a one-time reboot to materialize the `/Hither` synthetic root, you can:
 
-`bootstrap --reapply-only` (root phase only) skips steps 3-5. It is what the boot-time LaunchDaemon runs at WatchPaths trigger — file repair only.
+```bash
+ls /Hither/<nas>/
+```
 
-## Recipes
+…and every share you can read on the NAS is there.
+
+### Manual install
+
+```bash
+git clone https://github.com/johntrandall/hither.git ~/dev/hither
+cd ~/dev/hither
+# Symlink bin/hither into your PATH however you prefer (e.g., ln -s "$PWD/bin/hither" ~/.local/bin/hither).
+sudo $(which hither) bootstrap
+hither bootstrap --user-only
+hither subscribe <nas> --user <dsm-user>
+```
+
+## CLI
+
+```
+hither bootstrap [--reapply-only|--user-only|--root-only]
+                                          Install / re-apply Hither system state
+hither subscribe <nas> --user <dsm-user>  Add a NAS, store password in Keychain
+hither unsubscribe <nas> [--purge]        Remove a NAS subscription
+hither list                               Show subscribed NASes + last-sync age
+hither sync [<nas>]                       Manual fire of the daily sync
+hither status                             Daemon + config + mount state
+hither unmount <nas> | <nas>/<share> | all   Force-unmount with umount -f
+hither remount <nas> | all                Unmount + automount -cv
+hither logs [<nas>] [--tail]              Show / follow the sync log
+hither doctor                             Mount probes, Keychain, daemons, TM
+hither verify-no-leaks                    Pre-commit privacy gate
+hither uninstall [--purge]                Reverse of bootstrap
+hither version                            Print version
+```
+
+Common recipes:
 
 ```bash
 # Subscribe to a second NAS (HTTPS, custom schedule)
-hither subscribe hedwig --user johntrandall --proto https --schedule-hour 5
+hither subscribe othernas --user me --proto https --schedule-hour 5
 
-# List subscriptions and their last-sync age
-hither list
-
-# Tabular health/state view (daemons, files, per-sub mounts, stale detection)
+# Tabular health/state view
 hither status
 
-# Fire the daily sync now, for one NAS or all subscriptions
-hither sync                # all subs
-hither sync umbridge       # one sub
-
-# Look at the sync log
-hither logs                # all entries
-hither logs umbridge       # filter to one NAS
-hither logs --tail         # follow
+# Force a sync now, for one NAS or all subscriptions
+hither sync                     # all subs
+hither sync <nas>               # one sub
 
 # Force-unmount stuck shares
-hither unmount umbridge/Media     # one share
-hither unmount umbridge           # every mounted share under /Hither/umbridge/
-hither unmount all                # every Hither-managed mount
+hither unmount <nas>/Media      # one share
+hither unmount <nas>            # every mounted share under /Hither/<nas>/
+hither unmount all              # every Hither-managed mount
 
-# Unmount + reload autofs
-hither remount umbridge
-
-# Remove a NAS subscription (keeps the Keychain entry — re-subscribe is easy)
-hither unsubscribe umbridge
-
-# Same, but also wipe the Keychain entry (hard to undo)
-hither unsubscribe umbridge --purge
-
-# Reverse the entire install (user phase, then root phase)
-hither uninstall
-sudo "$(which hither)" uninstall
-# --purge also removes ~/.config/hither/ and every Keychain entry
-hither uninstall --purge
-sudo "$(which hither)" uninstall --purge
+# Override the password out-of-band (e.g. from a password manager)
+NAS_DSM_PASSWORD=$(op read 'op://Personal/<nas>/password') hither sync
+# (Env var is ${NAS_UPPER}_DSM_PASSWORD where NAS_UPPER is your nas
+# subscription name, uppercased; dashes → underscores.)
 ```
 
-### Manual sync with an out-of-band password
+## How it works
 
-`hither sync` refuses to run as root (Keychain access requires the user GUI session). To override the password via env var, e.g. from a password manager:
+Two daemons on each Mac, with non-overlapping responsibilities:
 
-```bash
-UMBRIDGE_DSM_PASSWORD=$(op read 'op://<vault>/<item>/password') hither sync
-```
+| Daemon | Type | Context | Role | Network? |
+|---|---|---|---|---|
+| `com.johnrandall.hither.bootstrap` | LaunchDaemon | root | Re-apply `/etc/synthetic.conf` + `/etc/auto_master` on revert; RunAtLoad + WatchPaths | never — runs before networking is up |
+| `com.johnrandall.hither.sync` | LaunchAgent | user GUI | Daily DSM API call → render map → write via `hither-write-map` | yes |
 
-## Verify
+The LaunchAgent runs in user GUI context (required for Keychain access). It calls the DSM Web API **as the target user**, which means the server-side ACL filter returns exactly the shares that user can read. The script renders an autofs indirect-map body and pipes it through a root-owned wrapper script that atomically writes `/etc/hither_<nas>` and runs `automount -cv`.
 
-```bash
-hither doctor              # mount probes, Keychain, daemons, TM exclusion
-hither status              # state snapshot (no probes)
-hither verify-no-leaks     # pre-commit privacy gate
-```
+The LaunchDaemon never touches the network and never `stat`s anything under `/Hither/`. Its only job is to keep `/etc/synthetic.conf` and `/etc/auto_master` from drifting.
 
-`doctor` reports the state of the three pieces of system configuration (synthetic root, auto_master entries, hither_* map files), probes a sample mount, and confirms both daemons are loaded. `verify-no-leaks` checks that no live share-path or PII data has been committed back into the repo.
+See **[docs/architecture.md](docs/architecture.md)** for the full data flow and **[docs/design-decisions.md](docs/design-decisions.md)** for *why* it's built this way.
 
-## Sub-projects
+> **About the LaunchDaemon labels.** Both `Label`s start with `com.johnrandall.` — the original author's reverse-DNS prefix. These labels are baked into existing installs and we don't rename them in v0.4.0 to avoid breaking upgrade paths. They aren't visible to typical users; operators inspecting `launchctl list` will see them.
 
-| Document | Purpose |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | Detailed architecture: both daemons, data flow |
-| [docs/design-decisions.md](docs/design-decisions.md) | Why this design — the alternatives considered and rejected |
-| [docs/glossary.md](docs/glossary.md) | Terms (autofs, lash, etc.) for non-John readers |
-| [docs/roadmap.md](docs/roadmap.md) | Internal planning: v0.2 → v1.0 distribution-readiness work |
+## Requirements
 
-The architectural rationale for adopting Hither across the fleet — and superseding the prior `auto_smb_*` sudoers scheme — lives in `admin-technical/ADRs/ADR-NNN-Hither-Lazy-Mounter.md` (TBD).
+- **macOS 15.7+ (Sequoia)** — symlink-form `synthetic.conf` and the `apfs.util -t` materialization path are tested on 15.7.x. Earlier releases are likely to work but untested.
+- **DSM 7.3+** on the NAS (Synology). Hither uses `SYNO.API.Auth` and `SYNO.FileStation.List`, which have been stable across DSM 7.x.
+- **`sudo >= 1.9.10`** (April 2022) — the sudoers grant in `sudoers/hither-write-map` uses sudo's regex-argument syntax (`^[a-z0-9-]+$`), introduced in 1.9.10. macOS Sequoia ships 1.9.13p2; Ventura also OK.
+- **`curl`, `jq`** — both ship with macOS (`jq` arrived in 15.0).
+- **An admin-group user** on each Mac. The sudoers grant is to `%admin`; the first user created on any macOS install is in `admin`, so this is usually the family member's normal account.
 
-## File layout
+Hither itself has no Python, no Node, no Go runtime. It's a few hundred lines of bash + zsh + two launchd plists.
 
-```
-hither/
-├── README.md                    # this file
-├── docs/
-│   ├── architecture.md          # detailed architecture
-│   ├── design-decisions.md      # rationale
-│   ├── glossary.md              # terms for non-John readers
-│   └── roadmap.md               # internal planning (v0.2 → v1.0)
-├── bin/
-│   └── hither                   # CLI (bootstrap, subscribe, list, sync, status, …)
-├── sbin/
-│   └── hither-write-map         # root-owned wrapper, installed at /usr/local/sbin/
-├── libexec/
-│   ├── hither-sync.sh           # daily share enumeration; installed at /usr/local/libexec/hither/
-│   └── hither-lib.sh            # shared bash helpers sourced by bin/hither (subscription I/O, LaunchAgent refresh)
-├── bootstrap/
-│   ├── add-synthetic-root.sh    # installs to /usr/local/libexec/hither/; appends "Hither<TAB>System/Volumes/Data/Hither" to /etc/synthetic.conf
-│   ├── apply-auto-master.sh     # installs to /usr/local/libexec/hither/; appends /Hither/{host} lines to /etc/auto_master
-│   └── install-launchdaemon.sh  # installs the plist to /Library/LaunchDaemons/
-├── launchd/
-│   ├── com.johnrandall.hither.bootstrap.plist   # LaunchDaemon — revert defender
-│   └── com.johnrandall.hither.sync.plist        # LaunchAgent — daily sync (template, __HOME__ substituted at install)
-├── server/                      # vestigial — xyOps registration (deleted in Phase 4, post burn-in)
-│   ├── hither-sync.manifest.json
-│   ├── register-events.sh
-│   └── sudoers/xysat-hither-sync
-├── scripts/
-│   ├── doctor.sh
-│   └── verify-no-leaks.sh
-├── completions/
-│   ├── hither.bash
-│   └── _hither
-└── lash.json                    # lash install manifest
-```
+## Status
+
+**v0.4.0 — public-release polish.** This is the first release intended for an audience beyond the author. The two-daemon architecture has been stable since v0.2.0, the CLI surface since v0.3.0, and the privacy/leak gate since v0.1.
+
+The LaunchAgent has been running daily on the author's primary Mac since 2026-05-20. **v1.0 will be cut after a clean 30-day burn-in.** Until then, expect minor changes; the on-disk subscription format and CLI surface are not expected to change incompatibly.
+
+## Contributing
+
+Issues and PRs welcome. For substantive changes, please open an issue first so we can talk about scope — Hither's design north star is *self-contained per-Mac tool*, and features that pull state out of the Mac (a sync server, a fleet console, a shared config repo) are deliberately out of scope.
+
+If you want a code-tour without reading every file, start with:
+
+1. [`docs/architecture.md`](docs/architecture.md) — what the two daemons do, and the data flow.
+2. [`docs/design-decisions.md`](docs/design-decisions.md) — why it's built that way (alternatives considered and rejected).
+3. [`bin/hither`](bin/hither) — the CLI is the visible surface.
+4. [`libexec/hither-sync.sh`](libexec/hither-sync.sh) — the load-bearing sync logic.
+
+## License
+
+[MIT](LICENSE). Copyright (c) 2026 John Randall.

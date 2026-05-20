@@ -1,41 +1,51 @@
 #!/bin/zsh
-# hither-sync — keep /etc/hither_<nas> current with shares the target
+# hither-sync — keep /etc/hither_<nas> current with the shares the target
 # DSM user can read.
 #
 # This script runs locally on each Mac. It is invoked by:
-#   - The com.johnrandall.hither.sync LaunchAgent (daily, user GUI context).
-#   - `hither sync` (manual fire, user shell).
+#   - The hither.sync LaunchAgent (daily fire, user GUI context).
+#   - `hither sync` (manual fire from a user shell).
 #
-# It is NOT a server-side script — there is no Hither server. The DSM API
-# call, map rendering, and write-via-wrapper all happen on the consuming
-# Mac, against the NAS over the LAN/Tailscale.
+# There is no Hither server. The DSM API call, map rendering, and
+# write-via-root-wrapper all happen on the consuming Mac itself, against
+# the NAS over the LAN (or Tailscale if you've routed it that way).
 #
 # Environment:
-#   TARGET_USER   DSM user whose visible-share-list we mirror (e.g., johntrandall).
-#   NAS_LIST      Space-separated NAS hostnames to sync (e.g., "umbridge").
-#                 (One /etc/hither_<nas> file per entry.)
+#   TARGET_USER   DSM user whose visible-share-list we mirror.
+#   NAS_LIST      Space-separated NAS hostnames to sync.
+#                 One /etc/hither_<nas> file is written per entry.
 #   NAS_PROTO     "http" or "https" for DSM Web API. Default: "http".
-#                 (LAN trust; flip to https when Tailscale-tunneled.)
+#                 (LAN trust; flip to https when tunneled.)
+#
+# The LaunchAgent's plist sets these env vars from the user's
+# subscription set; `hither sync` injects them per-invocation. On a
+# fresh install with no subscriptions yet, the script falls back to the
+# placeholder defaults below and exits 1 because the placeholder DSM
+# host isn't reachable — that's the expected signal to run
+# `hither subscribe`.
 #
 # DSM credential resolution:
-#   1. Env var ${NAS_UPPER}_DSM_PASSWORD (e.g. UMBRIDGE_DSM_PASSWORD).
-#      Lets the operator override out-of-band — e.g. `UMBRIDGE_DSM_PASSWORD=$(op read ...) hither sync`.
-#   2. macOS Keychain via `security find-internet-password -s <nas> -a <TARGET_USER> -w`.
-#      This is the load-bearing path. The LaunchAgent runs in user GUI
-#      context, which has Keychain access; the same Keychain entry that
-#      Finder Cmd-K uses for the SMB mount itself.
+#   1. Env var ${NAS_UPPER}_DSM_PASSWORD (e.g. for a NAS subscribed as
+#      "mynas", the var is MYNAS_DSM_PASSWORD).
+#      Lets the operator override out-of-band — e.g.
+#      `MYNAS_DSM_PASSWORD=$(op read ...) hither sync`.
+#   2. macOS Keychain via
+#      `security find-internet-password -s <nas> -a <TARGET_USER> -w`.
+#      This is the load-bearing path: the LaunchAgent runs in user GUI
+#      context, which has Keychain access, and uses the same Keychain
+#      entry that Finder Cmd-K populates for the SMB mount itself.
 #
-# No 1Password dependency. For users who keep DSM passwords in 1P,
-# inject via env-var override at invocation time.
+# No 1Password dependency. Users who keep DSM passwords in 1Password
+# can inject via env-var override at invocation time.
 #
-# Calling DSM AS the target user lets the server filter the share
-# list to exactly what that user can read — no admin API + per-share
-# ACL inspection needed.
+# Calling DSM AS the target user lets the server filter the share list
+# to exactly what that user can read — no admin API + per-share ACL
+# inspection needed.
 #
 # Sudo prerequisites (per Mac, in /etc/sudoers.d/hither-write-map):
-#   <user> ALL=(root) NOPASSWD: /usr/local/sbin/hither-write-map ^[a-z0-9-]+$
-# (Single grant — the wrapper validates ${host}, atomically writes /etc/hither_{host},
-#  and runs automount -cv internally.)
+#   %admin ALL=(root) NOPASSWD: /usr/local/sbin/hither-write-map ^[a-z0-9-]+$
+# Single grant — the wrapper validates ${host}, atomically writes
+# /etc/hither_{host}, and runs automount -cv internally.
 #
 # Idempotent. Safe to re-run. No-op when nothing changed.
 
@@ -43,8 +53,13 @@ set -uo pipefail
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-TARGET_USER="${TARGET_USER:-johntrandall}"
-NAS_LIST="${NAS_LIST:-umbridge}"
+# Placeholder defaults — overwritten by the LaunchAgent's env block (which
+# is rendered from the user's subscription set at `hither subscribe` time)
+# and by `hither sync`'s per-invocation env injection. Fresh installs with
+# no subscriptions will hit these and fail to resolve, which is the
+# intentional signal to run `hither subscribe <nas> --user <dsm-user>`.
+TARGET_USER="${TARGET_USER:-PLACEHOLDER_USER}"
+NAS_LIST="${NAS_LIST:-PLACEHOLDER_NAS}"
 NAS_PROTO="${NAS_PROTO:-http}"
 
 LOG_DIR="${HOME}/Library/Logs/hither"

@@ -43,10 +43,8 @@ if [[ -z "${patterns}" ]]; then
   exit 0
 fi
 
-# Exclude .git and backup dirs from scan. Hither v0.2.0 dropped the
-# xyOps-server-side directory (which previously held deployment-specific
-# identifiers and required this gate to skip it). The current repo holds
-# only generic code — every directory should pass the leak check.
+# Exclude .git and backup dirs from scan. The repo holds only generic
+# code — every other directory should pass the leak check.
 hits=$(grep -rEl --exclude-dir=.git --exclude-dir='*.pre-*' "${patterns}" "${SCAN_PATH}" 2>/dev/null || true)
 
 if [[ -n "${hits}" ]]; then

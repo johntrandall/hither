@@ -1,18 +1,6 @@
 # Glossary
 
-Terms used in Hither documentation that a non-John reader would not know.
-
-## John-specific infrastructure
-
-| Term | Meaning |
-|---|---|
-| **xyOps** | John's centralized job scheduler. Conductor component on Umbridge, xysat satellites on each managed Mac. Conceptually like cron, but distributed — with Secrets management, event lifecycle, and observability built in. Replaces ad-hoc launchd jobs scattered across the fleet. |
-| **xysat** | The per-Mac xyOps satellite process. Runs as `infra-agent`. Receives job dispatch events from Conductor and executes the local handler. |
-| **infra-agent** | Claude's service-account identity on all of John's shared infrastructure — Macs, Synology NAS devices, HA Yellow, Docker hosts, anything John has delegated. Distinct from John's personal accounts (`johnrandall` on Macs, `johnadmin` on Synology). |
-| **Umbridge** | John's Synology DiskStation (RS1221+ in the rack at 179 Summit). Synology hostnames follow the Harry Potter naming theme. Holds shared filesystems, Docker stacks, and the xyOps Conductor. |
-| **SusanBones** | John's primary Mac — a Mac Studio at 179 Summit. Also Harry Potter themed. |
-| **DSM** | DiskStation Manager. The Synology NAS operating system. |
-| **lash** | John's lightweight symlink-install tool for CLI development. Reads a `lash.json` manifest and creates symlinks from the dev clone into `~/.local/bin/` (and similar locations). The lightweight alternative to `brew install` for tools that don't have a tap yet. |
+Terms used in Hither documentation that aren't broadly known.
 
 ## macOS subsystems
 
@@ -21,5 +9,18 @@ Terms used in Hither documentation that a non-John reader would not know.
 | **autofs** | macOS's lazy-mount subsystem. Configured via `/etc/auto_master` (top-level map) and per-mountpoint maps like `/etc/auto_smb`. Mounts a filesystem on first access, unmounts after idle timeout. |
 | **automount** | The CLI tool that flushes autofs's configuration cache: `automount -cv` re-reads `auto_master` and child maps. |
 | **automountd** | The system daemon that performs the actual mount when a process touches a path under an autofs-managed root. |
-| **synthetic.conf** | Apple-provided mechanism (`/etc/synthetic.conf`) for adding synthetic root-level paths that survive OS updates. Originally added to support read-only system volume (Catalina+). Each line creates either an empty directory or a symlink at the root. |
+| **synthetic.conf** | Apple-provided mechanism (`/etc/synthetic.conf`) for adding synthetic root-level paths that survive OS updates. Originally added to support the read-only system volume (Catalina+). Each line creates either an empty directory or a symlink at the root. |
 | **apfs.util -t** | Materializes a synthetic.conf change without a reboot. Not Apple-documented for this use; established by the Nix installer and widely copied. |
+| **Sealed System Volume (SSV)** | The read-only system volume macOS Sequoia (and earlier, since Big Sur) mounts at `/`. Writable system state is kept on the separate `/System/Volumes/Data/` volume, joined back into the namespace via firmlinks. |
+| **Keychain (Internet password)** | macOS's credential store. `security add-internet-password` / `find-internet-password` are the CLI accessors. The same entries Finder Cmd-K populates for SMB/AFP mounts. |
+| **LaunchDaemon** | A launchd-managed service that runs as root, in the system context. Plist lives at `/Library/LaunchDaemons/`. No GUI session, no per-user environment. |
+| **LaunchAgent** | A launchd-managed service that runs as a user, in a GUI security session. Plist lives at `~/Library/LaunchAgents/`. Has Keychain access. |
+| **WatchPaths** | A launchd plist key that fires the service whenever a listed file changes. Used by the Hither bootstrap daemon to re-apply state when macOS updates revert it. |
+
+## SMB / DSM
+
+| Term | Meaning |
+|---|---|
+| **SMB** | Server Message Block — the file-sharing protocol macOS uses to mount Synology and other network shares. |
+| **DSM** | DiskStation Manager — Synology's NAS operating system. Exposes a Web API at `:5000` (HTTP) / `:5001` (HTTPS) that Hither uses to enumerate the user's visible shares. |
+| **indirect map** | An autofs map type where the keys are share names rather than full paths. `/Hither/<nas>` is an indirect-map mountpoint; `/Hither/<nas>/<share>` triggers a lazy mount of `<share>` on first access. |
