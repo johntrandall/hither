@@ -19,7 +19,7 @@ The sync flow:
 
 1. The xyOps event fires at 04:{schedule_minute} ET (per-host minute, low-priority window).
 2. The Mac's xysat worker receives the fire and runs the **wrapper** stored in the event's `params.script`.
-3. The wrapper `curl`s `hither-sync.sh` from Forgejo at the pinned SHA (using a readonly Forgejo token injected as the xyOps secret `forgejo-ro-admin-technical`), saves it to a tempfile, `chmod +x`, and `exec`s it with `TARGET_USER`, `NAS_LIST`, `NAS_PROTO`, and `OP_VAULT` exported.
+3. The wrapper `curl`s `hither-sync.sh` from Forgejo at the pinned SHA (using a readonly Forgejo token injected as the xyOps secret `forgejo-ro-admin-technical`), saves it to a tempfile, `chmod +x`, and `exec`s it with `TARGET_USER` and `NAS_LIST` exported. `NAS_PROTO` (default `http`) and `OP_VAULT` (default `JRVIS Infra`) are not exported by the wrapper; they fall back to the defaults in `hither-sync.sh`.
 4. `hither-sync.sh` calls the DSM Web API as the target user (`SYNO.FileStation.List/list_share`) — the server-side ACL filter returns exactly the shares that user can read.
 5. The script renders the share list as an autofs indirect-map body.
 6. It diffs against the on-disk `/etc/hither_{nas}`. If unchanged: no-op. If changed: pipes the body into `sudo -n /usr/local/sbin/hither-write-map {host}`.
