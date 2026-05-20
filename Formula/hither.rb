@@ -9,10 +9,10 @@
 class Hither < Formula
   desc "Lazy mounter for personal Mac SMB fleets — autofs + DSM + Keychain"
   homepage "https://github.com/johntrandall/hither"
-  url "https://github.com/johntrandall/hither/archive/refs/tags/v0.5.2.tar.gz"
+  url "https://github.com/johntrandall/hither/archive/refs/tags/v0.5.3.tar.gz"
   sha256 "PLACEHOLDER_FILLED_AT_RELEASE_TIME"
   license "MIT"
-  version "0.5.2"
+  version "0.5.3"
 
   depends_on :macos
   depends_on macos: :sequoia # 15.0+; symlink-form synthetic.conf is tested on 15.7.x
@@ -49,8 +49,10 @@ class Hither < Formula
         # Add your first NAS
         hither subscribe <nas> --user <dsm-user>
 
-      A reboot is required after the first install for /Hither to
-      materialize as a synthetic root.
+      /Hither is materialized at bootstrap time via `apfs.util -t` — no
+      reboot is needed in normal cases. If `ls /Hither` shows nothing
+      after install, reboot once as a fallback; `hither doctor` will
+      also flag a missing synthetic root.
 
       See `hither doctor` for a health snapshot, and the README at
       #{homepage} for the full lay of the land.

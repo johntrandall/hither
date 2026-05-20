@@ -59,7 +59,7 @@ After bootstrap, add your first NAS:
 hither subscribe <nas> --user <dsm-user>
 ```
 
-You'll be prompted for the DSM password (input hidden). Hither stores it in the macOS Keychain — the same entry Finder Cmd-K writes — and fires an initial sync. After a one-time reboot to materialize the `/Hither` synthetic root, you can:
+You'll be prompted for the DSM password (input hidden). Hither stores it in the macOS Keychain — the same entry Finder Cmd-K writes — and fires an initial sync. `/Hither` is materialized in the same bootstrap pass via `apfs.util -t` — no reboot needed in normal cases. If `ls /Hither` after install shows "No such file or directory", reboot once as a fallback and re-check; `hither doctor` will also flag the missing synthetic root.
 
 ```bash
 ls /Hither/<nas>/
@@ -135,6 +135,8 @@ Two daemons on each Mac, with non-overlapping responsibilities:
 The LaunchAgent runs in user GUI context (required for Keychain access). It calls the DSM Web API **as the target user**, which means the server-side ACL filter returns exactly the shares that user can read. The script renders an autofs indirect-map body and pipes it through a root-owned wrapper script that atomically writes `/etc/hither_<nas>` and runs `automount -cv`.
 
 When the share-set changes between syncs — the NAS admin adds a share you can now read, or revokes one you used to see — Hither surfaces that as a macOS user notification ("Hither — *nas*: + Photos / − OldShare"). New subscriptions opt into this by default; turn it off per-subscription with `hither subscribe <nas> --user <u> --notify=false`, or for a single manual sync with `hither sync --no-notify`.
+
+**Notification opt-in semantics, in detail.** New subscriptions created on v0.5.0+ default to `notify_on_changes = true`. Subscriptions created under v0.4.x predate the field — the absent field reads as `false` via `hither_sub_read_notify`, so upgraded installs stay silent by default. The runtime gate is a *single global* `HITHER_NOTIFY` env var on the LaunchAgent, OR-aggregated across all subscriptions: as soon as **any** subscription has `notify_on_changes = true`, the LaunchAgent fires with `HITHER_NOTIFY=1` and ALL subscriptions on that Mac route through the notification code path. So adding one new v0.5.0+ subscription with the default-true notify silently enables notifications for every existing sub on the same Mac — including v0.4.x-upgraded subs that were previously silent. To keep an upgraded sub silent, set its TOML `notify_on_changes = false` explicitly, or use `hither subscribe <nas> --notify=false` when adding new subs. Per-NAS notify gating is on the post-v1.0 roadmap; the TOML field is per-subscription (forward-compat) but the runtime gate is global.
 
 The LaunchDaemon never touches the network and never `stat`s anything under `/Hither/`. Its only job is to keep `/etc/synthetic.conf` and `/etc/auto_master` from drifting.
 

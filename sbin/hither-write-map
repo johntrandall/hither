@@ -38,6 +38,14 @@ fi
 target="/etc/hither_${host}"
 tempfile="${target}.tmp.$$"
 
+# v0.5.3: belt-and-suspenders EXIT trap. The individual error branches
+# below each `rm -f "$tempfile"` on their own paths, but a SIGKILL between
+# the tempfile write and the rename would orphan a file at
+# /etc/hither_<host>.tmp.<pid> forever. The trap covers that gap. After a
+# successful rename(2), the tempfile inode no longer lives at that name —
+# the trap's `rm -f` on the post-rename non-existent path is harmless.
+trap 'rm -f "${tempfile}" 2>/dev/null || true' EXIT
+
 # --- Read bounded stdin into the tempfile ---
 # 1 MiB cap is ~50x larger than the largest known map (~20 KiB)
 # Use mktemp-style + chmod-then-rename for atomicity

@@ -90,6 +90,51 @@ for cmd in curl jq sudo security; do
 done
 
 # ---------------------------------------------------------------------------
+# Single-flight lock (v0.5.3)
+# ---------------------------------------------------------------------------
+#
+# Two concurrent invocations — the 04:23 LaunchAgent firing while a user
+# also runs `hither sync` manually, or a teammate runs both at once — race
+# the wrapper. The wrapper itself is atomic per-call, but the two-step
+# read-DSM-then-write-map sequence isn't: caller A can read shares, caller B
+# can read shares, both call the wrapper in sequence, and the LAST write
+# wins. With DSM share-list filtering being deterministic, the result is
+# usually identical and the race is benign — but it spends 2× the DSM
+# auth tokens and trips the notification path twice for the same change.
+#
+# Pattern matches bootstrap/apply-auto-master.sh (mkdir mutex + stale TTL).
+# Lives at ${HOME}/Library/Caches/hither/sync.lock — user-writable; the
+# LaunchAgent runs as the user, so a /var/run/ root-owned lock would
+# require sudo just to acquire (worse than the race we're fixing).
+#
+# TTL: 600s. A normal sync against 2-3 NASes completes in well under 60s.
+# 10 minutes is unambiguously stale (SIGKILL'd or wedged DSM call).
+#
+# HITHER_LOCK_DIR override: tests set this to a tempdir so they don't
+# race the user's real sync; HITHER_SKIP_LOCK=1 (also test-only) disables
+# the lock entirely for the in-script verification path.
+LOCK_DIR="${HITHER_LOCK_DIR:-${HOME}/Library/Caches/hither}"
+LOCK="${LOCK_DIR}/sync.lock"
+LOCK_TTL_SEC=600
+if [[ "${HITHER_SKIP_LOCK:-0}" != "1" ]]; then
+  mkdir -p "${LOCK_DIR}"
+  if [[ -d "${LOCK}" ]]; then
+    lock_mtime=$(stat -f %m "${LOCK}" 2>/dev/null || echo 0)
+    lock_age=$(( $(date +%s) - lock_mtime ))
+    if (( lock_age > LOCK_TTL_SEC )); then
+      log "[warn] stale lock ${LOCK} (${lock_age}s > ${LOCK_TTL_SEC}s TTL) — breaking"
+      rmdir "${LOCK}" 2>/dev/null || true
+    fi
+  fi
+  if ! mkdir "${LOCK}" 2>/dev/null; then
+    log "another hither-sync is in flight (${LOCK}); exiting"
+    # Graceful no-op for concurrent fire — NOT an error condition.
+    exit 0
+  fi
+  trap 'rmdir "${LOCK}" 2>/dev/null || true' EXIT
+fi
+
+# ---------------------------------------------------------------------------
 # DSM API helpers
 # ---------------------------------------------------------------------------
 
@@ -300,8 +345,16 @@ fire_notification() {
   # 5-second timeout via perl alarm — osascript can hang indefinitely if
   # Notification Center is wedged. perl ships with macOS; no coreutils
   # dep. Subshell isolates the alarm so it can't leak to the parent.
-  ( perl -e 'alarm 5; exec @ARGV' /usr/bin/osascript -e "display notification \"${esc_body}\" with title \"${esc_title}\"" ) 2>/dev/null || true
-  log "  notification fired: ${title} — ${body}"
+  #
+  # v0.5.3: capture exit status. Previously this branch unconditionally
+  # logged "notification fired" even when the perl alarm fired (NC wedged,
+  # process killed) — a log lie that hid delivery failures from operators
+  # debugging "I never got a notification."
+  if ( perl -e 'alarm 5; exec @ARGV' /usr/bin/osascript -e "display notification \"${esc_body}\" with title \"${esc_title}\"" ) 2>/dev/null; then
+    log "  notification dispatched: ${title} — ${body}"
+  else
+    log "  [warn] notification dispatch timed out or failed for ${title} (alarm or osascript non-zero) — ${body}"
+  fi
 }
 
 apply_map_if_changed() {
@@ -398,6 +451,15 @@ for nas in ${(z)NAS_LIST}; do
   log "processing ${nas}"
   if ! sid=$(dsm_login "${nas}"); then
     log "  skipping ${nas} (auth failed)"
+    # v0.5.3: surface auth failure via notification when opted in.
+    # Until now a stale Keychain entry produced a single line in
+    # ~/Library/Logs/hither/sync.log and zero user-visible signal — users
+    # discovered the problem only when a stale `cd /Hither/<nas>/<share>`
+    # tripped a "No such file or directory". Fire a notification so the
+    # next sync surfaces the stale-credential condition immediately.
+    if [[ "${HITHER_NOTIFY:-0}" == "1" ]]; then
+      fire_notification "${nas}" "DSM auth failed — credential may be stale (run: hither subscribe ${nas} --user <dsm-user> to re-prompt)"
+    fi
     exit_code=1
     continue
   fi
