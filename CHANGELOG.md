@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.1] — 2026-05-20
+
+Iterative-verification fixes from the parallel verifier pass on v0.4.0. All bugs were caught BEFORE publication.
+
+### Fixed
+- **`hither uninstall` (no `--purge`) incorrectly suggested `--purge` for the root phase.** `${purge:+...}` expands when `purge` is set AND non-empty, and `purge=0` is non-empty, so the hint always read `sudo $(which hither) uninstall --purge` — which would have silently wiped subscription config and Keychain entries on a user who only asked to remove system files. Now explicitly tests `[[ "$purge" -eq 1 ]]` and prints the correct invocation. **Publication-blocker fix.**
+- **`hither list` and `hither status` printed `0\n0` for zero shares / zero auto_master entries.** The pattern `$(grep -c ... || echo 0)` ran when grep exits 1 on no-match, but grep had also printed `0` on stdout — so command substitution captured `"0\necho-0"`. Replaced with `$(grep -c ... ) || var=0` (grep prints its own 0; we just guard against the exit-1).
+- **`hither subscribe --user foo` (forgetting the positional NAS arg) reported "unknown arg to subscribe: u"** because `--user` was consumed as the NAS name and the shifter went on to parse `foo` as an unknown flag. Now rejects `--` -prefixed first args with a clear message.
+- **`hither sync` on an unbootstrapped Mac told the user to run `sudo bootstrap`** when the more useful hint is "no subscriptions — run subscribe." Re-ordered the checks: empty-subscription state is now reported first; bootstrap-missing only surfaces when subscriptions exist but the system isn't installed.
+
+### Documented
+- **`docs/architecture.md`** — corrected two claims the architecture verifier flagged: (1) per-subscription `schedule_hour` / `schedule_minute` are NOT honored by the runtime (the LaunchAgent's `StartCalendarInterval` is fixed by the plist template; `hither_refresh_launchagent_env` only touches env vars), (2) softened the "catch-up on resume" language to make clear it's standard launchd behavior, not a Hither feature.
+
+### Version
+- `bin/hither` `HITHER_VERSION` → `0.4.1`
+- `Formula/hither.rb` `version` → `0.4.1`
+
 ## [0.4.0] — 2026-05-20
 
 Public-release polish pass. The repo is intended to flip from private to

@@ -14,7 +14,7 @@ The privilege/context split is load-bearing:
 - **The defender must run as root.** It writes to `/etc/synthetic.conf` and `/etc/auto_master`. It cannot run as a LaunchAgent because LaunchAgents have no write access to `/etc/`.
 - **The sync must run in user GUI context.** It calls `security find-internet-password` to read the DSM password from Keychain. Keychain access requires a GUI security session (`gui/<uid>` launchd domain). Running this work as a LaunchDaemon was tried and rejected — Keychain calls fail with `errSecAuthFailed (-25293)` under launchd-root.
 - **The defender must do no network calls.** It runs at boot, before Wi-Fi / DHCP / DNS / any overlay VPN (Tailscale, WireGuard, etc.) is up. A network call would hang or fail.
-- **The sync may rely on network.** It runs at 04:23 local time, after the system is fully up. Catch-up on resume is handled by launchd's normal StartCalendarInterval semantics (missed runs fire on next wake).
+- **The sync may rely on network.** It runs at 04:23 local time, after the system is fully up. Catch-up on resume is handled by launchd's standard `StartCalendarInterval` semantics — if the Mac is asleep at 04:23, launchd fires the agent on next wake. Hither itself does nothing special here; we just inherit launchd's behavior.
 
 ## Client-side state
 
@@ -126,4 +126,4 @@ This is the **single source of truth** for which NASes this Mac syncs. Adding/re
 
 The LaunchAgent's plist on disk holds materialized values for `NAS_LIST` and `TARGET_USER`. The template in the repo (`launchd/com.johnrandall.hither.sync.plist`) holds placeholder values that are overwritten on every `subscribe` / `unsubscribe`. The reason for materializing into the plist instead of reading the TOML at fire time: launchd doesn't run the agent in a shell, so the agent needs its env populated declaratively in the plist.
 
-Multiple subscriptions on one Mac share a single LaunchAgent — there's one daily fire, and `hither-sync.sh` iterates `NAS_LIST` internally. Per-subscription schedules are recorded in the TOML but not currently honored by the runtime (the LaunchAgent's schedule comes from the first subscription's TOML, or from the plist template if no subscriptions exist). Per-NAS schedule support is post-v1.0.
+Multiple subscriptions on one Mac share a single LaunchAgent — there's one daily fire, and `hither-sync.sh` iterates `NAS_LIST` internally. Per-subscription `schedule_hour` and `schedule_minute` are recorded in each TOML but NOT honored by the runtime today: the LaunchAgent fires at whatever schedule the plist template ships with (currently hour 4, minute 23). `hither_refresh_launchagent_env` rewrites the `TARGET_USER` and `NAS_LIST` env vars on every subscribe/unsubscribe but does not touch `StartCalendarInterval`. Per-NAS scheduling is post-v1.0.

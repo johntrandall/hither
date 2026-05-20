@@ -32,15 +32,26 @@ Hither addresses all four:
 
 ## Install
 
-The recommended install path is Homebrew via a tap:
+> **Note:** the Homebrew tap is not yet published. Install from source today (below); the `brew` form will land at v1.0.
+
+For now, install from source:
 
 ```bash
-brew install johntrandall/hither/hither
-sudo $(brew --prefix)/bin/hither bootstrap   # root phase
-hither bootstrap --user-only                 # user phase
+git clone https://github.com/johntrandall/hither.git ~/hither
+cd ~/hither
+sudo bin/hither bootstrap         # root phase: /etc/, /usr/local/, LaunchDaemon
+bin/hither bootstrap --user-only  # user phase: ~/Library/LaunchAgents
 ```
 
-> The Homebrew tap is being set up; until it's live, install from a local clone (see [Manual install](#manual-install) below). The `Formula/hither.rb` in this repo is the formula that will ship in the tap.
+The future Homebrew path will be:
+
+```bash
+brew install johntrandall/hither/hither   # v1.0+ — not yet live
+sudo $(brew --prefix)/bin/hither bootstrap
+hither bootstrap --user-only
+```
+
+The `Formula/hither.rb` in this repo is the formula that will ship in the tap.
 
 After bootstrap, add your first NAS:
 
@@ -141,7 +152,7 @@ Hither itself has no Python, no Node, no Go runtime. It's a few hundred lines of
 
 **v0.4.0 — public-release polish.** This is the first release intended for an audience beyond the author. The two-daemon architecture has been stable since v0.2.0, the CLI surface since v0.3.0, and the privacy/leak gate since v0.1.
 
-The LaunchAgent has been running daily on the author's primary Mac since 2026-05-20. **v1.0 will be cut after a clean 30-day burn-in.** Until then, expect minor changes; the on-disk subscription format and CLI surface are not expected to change incompatibly.
+Under active development on the author's primary Mac. The same DSM-API-to-autofs-map flow has been running daily in an earlier form (a centrally-scheduled job) since early May 2026; v0.2.0+ is a self-contained refactor of that flow. **v1.0 will be cut after a clean 30-day burn-in of the LaunchAgent form.** Until then, expect minor changes — the on-disk subscription format and CLI surface are not expected to change incompatibly, but no promises until v1.0.
 
 ## Contributing
 

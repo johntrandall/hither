@@ -29,7 +29,7 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 export HITHER_ROOT="${PROJECT_ROOT}"
 
-HITHER_VERSION="0.4.0"
+HITHER_VERSION="0.4.1"
 VERSION="${HITHER_VERSION}"  # back-compat for any external consumer
 export HITHER_VERSION
 
@@ -280,6 +280,11 @@ cmd_subscribe() {
   if [[ $# -lt 1 ]]; then
     die "usage: hither subscribe <nas> --user <dsm-user> [--proto http|https] [--schedule-hour H] [--schedule-minute M]"
   fi
+  # Guard against `hither subscribe --user foo`: $1 here would be `--user`,
+  # which would silently become the nas name. Require a positional nas first.
+  if [[ "$1" == --* ]]; then
+    die "first arg to subscribe must be the NAS name, not a flag (got '$1'); usage: hither subscribe <nas> --user <dsm-user>"
+  fi
   nas="$1"; shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -455,7 +460,10 @@ cmd_list() {
     # SHARES: count non-comment, non-blank lines in /etc/hither_<nas>.
     map="/etc/hither_${nas}"
     if [[ -r "${map}" ]]; then
-      shares=$(grep -cvE '^[[:space:]]*(#|$)' "${map}" 2>/dev/null || echo 0)
+      # grep -c prints "0" on its own when there are no matches; `|| echo 0`
+      # would double-output because grep also exits 1 in that case. Capture
+      # just grep's output; exit code is acceptable.
+      shares=$(grep -cvE '^[[:space:]]*(#|$)' "${map}" 2>/dev/null) || shares=0
     else
       shares="-"
     fi
@@ -499,20 +507,24 @@ cmd_sync() {
   if [[ $EUID -eq 0 ]]; then
     die "'hither sync' must NOT be run as root — Keychain access requires user GUI session"
   fi
-  [[ -x /usr/local/libexec/hither/hither-sync.sh ]] \
-    || die "/usr/local/libexec/hither/hither-sync.sh not installed — run: sudo \$(which hither) bootstrap"
 
   local target_nas="${1:-}"
   local subs
   subs="$(hither_sub_list_names)"
 
+  # Check for subscriptions FIRST so a user on an unbootstrapped machine
+  # gets the more actionable hint (subscribe to add a NAS) rather than the
+  # less useful one (sudo bootstrap), unless they have neither.
   if [[ -z "${subs}" && -z "${target_nas}" ]]; then
-    # Backwards-compat: if no subscriptions exist, fall through to the
-    # script's env-var defaults. Lets `hither sync` work mid-migration
-    # for an existing v0.2 install that hasn't been re-subscribed yet.
-    echo "[hint] no subscriptions — falling back to env-var defaults from hither-sync.sh"
-    exec /usr/local/libexec/hither/hither-sync.sh
+    if [[ ! -x /usr/local/libexec/hither/hither-sync.sh ]]; then
+      die "no subscriptions and Hither isn't installed yet — first run: sudo \$(which hither) bootstrap, then: hither subscribe <nas> --user <dsm-user>"
+    fi
+    echo "[hint] no subscriptions yet — run: hither subscribe <nas> --user <dsm-user>"
+    return 0
   fi
+
+  [[ -x /usr/local/libexec/hither/hither-sync.sh ]] \
+    || die "/usr/local/libexec/hither/hither-sync.sh not installed — run: sudo \$(which hither) bootstrap"
 
   if [[ -n "${target_nas}" ]]; then
     hither_validate_nas_name "${target_nas}" \
@@ -581,7 +593,7 @@ cmd_status() {
   fi
 
   local am_count
-  am_count=$(grep -cE '^/Hither/' /etc/auto_master 2>/dev/null || echo 0)
+  am_count=$(grep -cE '^/Hither/' /etc/auto_master 2>/dev/null) || am_count=0
   printf '  %-46s %s\n' "/etc/auto_master" "ok (${am_count} /Hither/ entries)"
 
   if [[ -L /Hither ]]; then
@@ -603,7 +615,7 @@ cmd_status() {
     local shares="-"
     local last_age="never"
     if [[ -r "$map" ]]; then
-      shares=$(grep -cvE '^[[:space:]]*(#|$)' "$map" 2>/dev/null || echo 0)
+      shares=$(grep -cvE '^[[:space:]]*(#|$)' "$map" 2>/dev/null) || shares=0
       local mt now age_min
       mt=$(stat -f '%m' "$map" 2>/dev/null || echo "")
       if [[ -n "$mt" ]]; then
@@ -788,7 +800,14 @@ cmd_uninstall() {
 
     echo
     echo "Next: run the root phase to remove system files:"
-    echo "      sudo \$(which hither) uninstall${purge:+ --purge}"
+    # purge is 0/1; only suggest --purge when the user actually asked for it.
+    # `${purge:+...}` is wrong here — it expands when purge is set AND non-empty,
+    # and "0" is non-empty so it would always suggest --purge (silently destructive).
+    if [[ "$purge" -eq 1 ]]; then
+      echo "      sudo \$(which hither) uninstall --purge"
+    else
+      echo "      sudo \$(which hither) uninstall"
+    fi
     return
   fi
 
