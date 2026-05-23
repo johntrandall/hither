@@ -21,7 +21,11 @@ class Hither < Formula
   def install
     bin.install "bin/hither"
     libexec.install Dir["libexec/*"]
-    pkgshare.install "bootstrap", "launchd", "sbin", "sudoers", "scripts", "completions"
+    # Hither's bin/hither computes HITHER_ROOT as $(dirname bin/hither)/.. and
+    # then references ${HITHER_ROOT}/bootstrap, ${HITHER_ROOT}/launchd, etc.
+    # So these go at the keg prefix (sibling of bin/, libexec/), NOT under pkgshare.
+    # The completions/ dir is installed separately via bash_completion / zsh_completion below.
+    prefix.install "bootstrap", "launchd", "sbin", "sudoers", "scripts"
 
     # Bash and zsh completions go in the standard Homebrew locations so
     # they're discovered automatically by `brew shellenv`-configured shells.
