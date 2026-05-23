@@ -179,33 +179,31 @@ fi
 # DSM API helpers
 # ---------------------------------------------------------------------------
 
-dsm_login() {
+resolve_dsm_password() {
   # Args: <nas-host>
-  # Returns SID on stdout (single line), or non-zero on failure.
+  # Resolves the DSM password for ${TARGET_USER}@<nas> and prints it to stdout.
+  # Returns non-zero on failure.
   #
-  # Credential resolution order:
+  # Resolution order:
   #   1. ${<NAS_UPPER>_DSM_PASSWORD}   ← env-var override (manual / scripted)
   #   2. macOS Keychain (security find-internet-password)  ← LaunchAgent path
   #
-  # v0.5.5: on success, also writes the resolved cleartext password to the
-  # script-scope variable HITHER_LAST_DSM_PASSWORD so the main loop can
-  # thread it into render_map for URL-encoded embedding in the map file.
-  # NOT exported — process-internal only. Cleared on failure paths.
+  # v0.5.6: split out from dsm_login so the caller can capture the password
+  # in the parent shell BEFORE running dsm_login in a `$(...)` subshell. The
+  # v0.5.5 design tried to stash the password in a script-scope variable
+  # inside dsm_login — but that's invisible to the parent because command
+  # substitution always runs in a subshell. The result was that render_map
+  # received an empty password and the map file was generated with
+  # `://user:@host/share` (empty pw slot). Verified 2026-05-23 on VictorKrum
+  # via the LaunchAgent + Keychain path. The xyOps env-var path masked the
+  # bug because the env var was already set in the parent shell.
   local nas="$1"
   local password=""
   local nas_upper
   nas_upper=$(printf '%s' "$nas" | tr '[:lower:]-' '[:upper:]_')
   local env_var_name="${nas_upper}_DSM_PASSWORD"
-  # zsh: ${(P)var} is parameter-name expansion; bash equivalent is ${!var}.
-  # Use eval to stay portable across zsh (script's shebang) and any bash callers.
   eval "password=\${${env_var_name}:-}"
   if [[ -z "$password" ]]; then
-    # Keychain lookup. `security find-internet-password -w` prints just the
-    # password to stdout on success, nothing on failure. The -s/-a tuple
-    # matches the same Keychain entry Finder Cmd-K uses for SMB:
-    #   security add-internet-password -s <nas> -a <user> -r 'smb ' -w <pass>
-    # (Finder may also write protocol 'afp '/'cifs'; we don't filter by -r
-    # so any matching server+account pair is acceptable.)
     password=$(security find-internet-password -s "${nas}" -a "${TARGET_USER}" -w 2>/dev/null) \
       || { log "  no credential: \$${env_var_name} unset AND no Keychain entry for ${TARGET_USER}@${nas} (try 'security add-internet-password' or prime via Finder Cmd-K)"; return 1; }
   fi
@@ -213,6 +211,18 @@ dsm_login() {
     log "  empty DSM password — env-var and Keychain both yielded blank"
     return 1
   fi
+  printf '%s' "$password"
+}
+
+dsm_login() {
+  # Args: <nas-host> <password>
+  # Returns SID on stdout (single line), or non-zero on failure.
+  #
+  # Credential is now resolved by the caller via resolve_dsm_password (v0.5.6).
+  # See that function's docblock for the subshell-propagation rationale.
+  local nas="$1" password="$2"
+
+  [[ -n "$password" ]] || { log "  dsm_login: empty password arg"; return 1; }
 
   local resp
   resp=$(curl -sS --max-time 10 \
@@ -226,10 +236,8 @@ dsm_login() {
 
   local ok sid
   ok=$(echo "${resp}" | jq -r '.success // false')
-  [[ "${ok}" == "true" ]] || { HITHER_LAST_DSM_PASSWORD=""; log "  DSM auth failed: $(echo "$resp" | jq -c '.error // empty')"; return 1; }
+  [[ "${ok}" == "true" ]] || { log "  DSM auth failed: $(echo "$resp" | jq -c '.error // empty')"; return 1; }
   sid=$(echo "${resp}" | jq -r '.data.sid')
-  # v0.5.5: stash for render_map. NOT printed; only the SID goes to stdout.
-  HITHER_LAST_DSM_PASSWORD="${password}"
   printf '%s\n' "${sid}"
 }
 
@@ -515,13 +523,23 @@ apply_map_if_changed() {
 
 log "hither-sync start (target_user=${TARGET_USER}, nas_list='${NAS_LIST}')"
 
-# v0.5.5: script-scope. Set by dsm_login on success; consumed by render_map.
-HITHER_LAST_DSM_PASSWORD=""
+# v0.5.6: password resolved in parent shell via resolve_dsm_password before each
+# dsm_login call. Avoids the v0.5.5 subshell-propagation bug where a stash
+# inside dsm_login's `$(...)` subshell was never visible to render_map.
 
 exit_code=0
 for nas in ${(z)NAS_LIST}; do
   log "processing ${nas}"
-  if ! sid=$(dsm_login "${nas}"); then
+  # v0.5.6: resolve password in parent shell so render_map can see it.
+  if ! dsm_password=$(resolve_dsm_password "${nas}"); then
+    log "  skipping ${nas} (no credential)"
+    if [[ "${HITHER_NOTIFY:-0}" == "1" ]]; then
+      fire_notification "${nas}" "No DSM credential — env-var unset and Keychain empty (run: hither subscribe ${nas} --user <dsm-user>)"
+    fi
+    exit_code=1
+    continue
+  fi
+  if ! sid=$(dsm_login "${nas}" "${dsm_password}"); then
     log "  skipping ${nas} (auth failed)"
     # v0.5.3: surface auth failure via notification when opted in.
     # Until now a stale Keychain entry produced a single line in
@@ -547,18 +565,18 @@ for nas in ${(z)NAS_LIST}; do
     else
       share_count=$(printf '%s\n' "${shares}" | wc -l | tr -d ' ')
       log "  ${share_count} visible shares"
-      # v0.5.5: pass cleartext password (resolved by dsm_login) to render_map
-      # for URL-encoded embedding in the map line. See render_map docblock
-      # for the why; the file is written mode 0600 by hither-write-map.
+      # v0.5.6: pass cleartext password (resolved in parent shell) to
+      # render_map for URL-encoded embedding in the map line. See render_map
+      # docblock for the why; the file is written mode 0600 by hither-write-map.
       printf '%s\n' "${shares}" \
-        | render_map "${nas}" "${HITHER_LAST_DSM_PASSWORD}" \
+        | render_map "${nas}" "${dsm_password}" \
         | apply_map_if_changed "${nas}" \
         || exit_code=1
     fi
   } always {
     dsm_logout "${nas}" "${sid}"
-    # v0.5.5: scrub the cleartext from the script-scope var between NASes.
-    HITHER_LAST_DSM_PASSWORD=""
+    # v0.5.6: scrub the cleartext from the parent-shell var between NASes.
+    dsm_password=""
   }
 done
 

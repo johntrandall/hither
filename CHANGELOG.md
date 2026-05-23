@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.6] — 2026-05-23
+
+Fix the v0.5.5 URL-encoded-credential embedding for the LaunchAgent + Keychain path. The v0.5.5 verification was done under the xyOps env-var path (`UMBRIDGE_DSM_PASSWORD` set in the parent shell), which masked a subshell-propagation bug: `dsm_login` was called as `sid=$(dsm_login "${nas}")` and stashed the resolved password into the script-scope `HITHER_LAST_DSM_PASSWORD` from *inside* the command-substitution subshell. The parent shell never saw it. `render_map` then received an empty password and the map file was generated with `://user:@host/share` (empty pw slot), causing `mount_smbfs` to reject every mount with "Authentication error."
+
+### Changed
+- **`libexec/hither-sync.sh`** splits credential resolution out of `dsm_login` into a new `resolve_dsm_password()` helper. The main loop calls `dsm_password=$(resolve_dsm_password "${nas}")` first — that subshell only has to print the password, which the parent captures — then passes the resolved password into both `dsm_login` (as an explicit arg) and `render_map`. Removes the script-scope `HITHER_LAST_DSM_PASSWORD` variable entirely.
+- **`bin/hither`** version bump 0.5.5 → 0.5.6.
+
+### Verified
+Discovered 2026-05-23 during fresh VictorKrum install via `brew install johntrandall/tap/hither` + `hither subscribe umbridge --user karinalinch`. Map file showed `karinalinch:@umbridge/...` (empty pw slot); direct `mount_smbfs` with a freshly-built URL succeeded, confirming the password was the problem. The fix produces the expected `karinalinch:<URL_ENCODED_PW>@umbridge/...` form. **Verified** at the unit level (`url_encode` produces correct output for input, parent-shell var capture confirmed). **Inferred** that this also fixes the SusanBones LaunchAgent path (the xyOps env-var path masked the bug and was the only one actually verified at v0.5.5).
+
 ## [0.5.5] — 2026-05-20
 
 Fully automated SMB mounts via URL-encoded credentials embedded in the autofs map. Discovered in live SusanBones testing under v0.5.4: `mount_smbfs //user@host/share` — which `automountd` invokes internally on every mount trigger — cannot reliably find or use a Keychain entry created by `security add-internet-password`, even with the GUI `-A` permissive ACL. NetFS, AppleScript, and Finder Cmd-K all accept the same Keychain entry; only `mount_smbfs` rejects with "server rejected the connection: Authentication error" while the byte-for-byte password match is correct. Forcing users to Cmd-K once after `hither subscribe` defeats the fully-automated goal that v0.2–v0.5 worked toward.
